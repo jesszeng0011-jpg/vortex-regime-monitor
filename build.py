@@ -26,8 +26,8 @@ HOLIDAYS = {
 
 PHRASE_DEPLOY = "beta toward 1.0"
 PHRASE_STOP = "beta to ~0.25"
-PHRASE_BASE = "deploy as B (beta 0.5–0.75)"
-FOOTER = "Base case: deploy as B (beta 0.5–0.75) in tranches after each catalyst."
+PHRASE_BASE = "(beta 0.5–0.75)"
+FOOTER = "Base case: deploy as Sticky boom (B) (beta 0.5–0.75) in tranches after each catalyst."
 
 PRICES = [
     ("SPY", "B lead"),
@@ -416,7 +416,7 @@ def _needles() -> list[str]:
 
 def privacy_scan(html: str, layout: bool = False) -> None:
     cleaned = html
-    for phrase in (PHRASE_DEPLOY, PHRASE_STOP, PHRASE_BASE, "Book beta"):
+    for phrase in (PHRASE_DEPLOY, PHRASE_STOP, PHRASE_BASE, "Book beta", "Our beta"):
         cleaned = cleaned.replace(phrase, "")
     lowered = cleaned.lower()
     token = "".join(chr(code) for code in (98, 101, 116, 97))
@@ -1089,7 +1089,7 @@ def price_cells(ticker: str, view: dict) -> str:
     price = tip(fmt_px(last["close"]), f"Yahoo Finance {ticker}. {session_phrase(last)}")
     one_html = tip(fmt_pct(one), "Prior session to the latest session.", move_class(one)) if one is not None else tip(DASH, "No prior session.")
     five_html = tip(fmt_pct(five), "Five sessions back to the latest session.", move_class(five)) if five is not None else tip(DASH, "Not enough sessions.")
-    line = spark([bar["close"] for bar in bars[-20:]], 72, 14)
+    line = spark([bar["close"] for bar in bars[-20:]], 72, 12)
     return f"<tr><td>{esc(ticker)}</td><td class='num'>{price}</td><td class='num'>{one_html}</td><td class='num'>{five_html}</td><td>{line}</td><td class='num'>{since}</td></tr>"
 
 
@@ -1132,7 +1132,7 @@ def ratio_row(view: dict) -> str:
         f"<tr><td>NBIS/CRWV</td><td class='num'>{tip(f'{vals[-1]:.2f}', detail)}</td>"
         f"<td class='num'>{tip(fmt_pct(one), 'One-session change in the ratio.', move_class(one))}</td>"
         f"<td class='num'>{tip(fmt_pct(five), 'Five-session change in the ratio.', move_class(five))}</td>"
-        f"<td>{spark(vals[-20:], 72, 14)}</td><td class='num'>{since}</td></tr>"
+        f"<td>{spark(vals[-20:], 72, 12)}</td><td class='num'>{since}</td></tr>"
     )
 
 
@@ -1163,24 +1163,35 @@ def changes_block(prior: dict | None, current: dict) -> str:
     return "".join(lines)
 
 
-BOX_NAME = {
-    "A": "Cooling expansion",
-    "B": "Sticky but viable",
-    "C": "Inflation squeeze",
-    "D": "AI retrenchment",
-    "D_money": "AI retrenchment, money",
-    "E": "Broad break",
-    "F": "Blocked buildout",
+REGIMES = {
+    "A": {"name": "Soft landing", "plain": "Inflation falls, growth holds, AI keeps getting funded", "band": "1.0–1.25", "lo": 1.0, "hi": 1.25},
+    "B": {"name": "Sticky boom", "plain": "Inflation too high for the Fed to stop, but jobs and AI spending hold", "band": "0.5–0.75", "lo": 0.5, "hi": 0.75},
+    "C": {"name": "Rate squeeze", "plain": "Inflation or oil forces more hikes; long-duration assets reprice", "band": "~0.25", "lo": 0.25, "hi": 0.25},
+    "D": {"name": "AI bust", "plain": "AI spending falls: customers stop paying, or builders can't borrow", "band": "~0.25", "lo": 0.25, "hi": 0.25},
+    "E": {"name": "Recession", "plain": "Weakness spreads from AI into jobs and credit everywhere", "band": "0–0.1", "lo": 0.0, "hi": 0.1},
+    "F": {"name": "Permit jam", "plain": "Demand intact, but rules or power block new sites; the well-funded self-build, the rest wait", "band": "0.5–0.75", "lo": 0.5, "hi": 0.75},
 }
-BANDS = {"B": (0.5, 0.75)}
 SEGMENTS = [
-    ("B", "B", "b"),
-    ("D_money", "D-money", "d"),
-    ("F", "F", "f"),
-    ("C", "C", "c"),
-    ("A", "A", "a"),
-    ("E", "E", "e"),
+    ("B", "Sticky boom", "b"),
+    ("D_money", "AI bust\u2013money", "d"),
+    ("D_demand", "AI bust\u2013demand", "dd"),
+    ("F", "Permit jam", "f"),
+    ("C", "Rate squeeze", "c"),
+    ("A", "Soft landing", "a"),
+    ("E", "Recession", "e"),
 ]
+
+
+def regime_key(box: str) -> str:
+    if box in ("D", "D_money", "D_demand"):
+        return "D"
+    return box
+
+
+def regime_html(box: str) -> str:
+    key = regime_key(box)
+    name = REGIMES.get(key, {}).get("name", box)
+    return f'{esc(name)} <span class="tag">{esc(key)}</span>'
 
 
 def prob_line(judgment: dict) -> str:
@@ -1195,7 +1206,10 @@ def prob_line(judgment: dict) -> str:
         arrow = ""
         if isinstance(prior, dict) and key in prior and isinstance(prior[key], (int, float)) and prior[key] != value:
             arrow = " ↑" if value > prior[key] else " ↓"
-        parts.append(f'<span class="seg {kind}" style="flex:{value}">{esc(label)} {value:g}{arrow}</span>')
+        parts.append(
+            f'<span class="seg {kind}" style="flex-grow:{value}">'
+            f'<span class="segname">{esc(label)}</span> <span class="segnum">{value:g}{arrow}</span></span>'
+        )
     return f'<div class="pbar" title="{esc(note)}">{"".join(parts)}</div>'
 
 
@@ -1211,21 +1225,40 @@ def beta_tile(view: dict, judgment: dict) -> str:
     detail = f"Manual {fmt_dt(datetime.fromisoformat(raw['asof_sgt']))}. {raw.get('source', '')}"
     number = tip(shown, detail, "")
     box = judgment.get("current_box")
-    band = BANDS.get(box)
-    if not band:
+    info = REGIMES.get(regime_key(box or ""))
+    if not info:
         gauge = '<p class="muted">no band for this box</p>'
     else:
-        lo, hi = band
-        inside = lo <= value <= hi
-        pos = 0 if hi == lo else max(0, min(100, (value - lo) / (hi - lo) * 100))
+        lo, hi = info["lo"], info["hi"]
+        inside = lo <= float(value) <= hi
         state = "in" if inside else "out"
-        gauge = (
-            f'<div class="gauge {state}"><i style="left:{pos:.1f}%"></i></div>'
-            f'<p class="muted">{esc(box)} band {lo:.1f}–{hi:.2f}</p>'
-        )
+        if hi > lo:
+            pos = max(0, min(100, (float(value) - lo) / (hi - lo) * 100))
+            track = f'<div class="gauge {state}"><i style="left:{pos:.1f}%"></i></div>'
+        else:
+            track = ""
+        gauge = track + f'<p class="muted">{regime_html(box)} band {esc(info["band"])}</p>'
     return (
         '<article class="htile"><p class="k">Book beta</p>'
         f'<p class="key">{number} <span class="manual">manual</span></p>{gauge}</article>'
+    )
+
+
+def legend_table() -> str:
+    rows = []
+    for key in ("A", "B", "C", "D", "E", "F"):
+        info = REGIMES[key]
+        rows.append(
+            "<tr>"
+            f"<td>{regime_html(key)}</td>"
+            f"<td>{esc(info['plain'])}</td>"
+            f"<td class='num'>{esc(info['band'])}</td>"
+            "</tr>"
+        )
+    return (
+        "<table class='legend'><thead><tr>"
+        "<th>Regime</th><th>In plain words</th><th class='num'>Our beta</th>"
+        f"</tr></thead><tbody>{''.join(rows)}</tbody></table>"
     )
 
 
@@ -1247,8 +1280,7 @@ def page(view: dict, judgment: dict, changes_html: str) -> str:
     <section class="heroes">
       <article class="htile">
         <p class="k">Box</p>
-        <p class="boxletter">{esc(box)}</p>
-        <p>{esc(BOX_NAME.get(box, box))} · {esc(weight_txt)}</p>
+        <p class="boxname">{regime_html(box)} <span class="boxpct">· {esc(weight_txt)}</span></p>
       </article>
       <article class="htile">
         <p class="k">Action</p>
@@ -1280,6 +1312,8 @@ def page(view: dict, judgment: dict, changes_html: str) -> str:
     {price_table(view)}
     <h2>Last 3 changes</h2>
     <section class="changes">{changes_html}</section>
+    <h2>Legend</h2>
+    {legend_table()}
     """
     return HTML_HEAD + body + HTML_FOOT
 
@@ -1338,9 +1372,9 @@ body {
   font-weight: 400;
   font-variant-numeric: tabular-nums;
 }
-.page { max-width: 1280px; margin: 0 auto; padding: 8px 24px 4px; }
+.page { max-width: 1280px; margin: 0 auto; padding: 4px 24px 0; }
 .tools { display: flex; justify-content: flex-end; }
-h2 { margin: 6px 0 2px; font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+h2 { margin: 0; font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
 p { margin: 0; overflow-wrap: break-word; }
 .note { color: var(--muted); font-size: 13px; margin: 4px 0 0; }
 .heroes, .legs, .checks { display: grid; gap: 8px; }
@@ -1353,11 +1387,13 @@ p { margin: 0; overflow-wrap: break-word; }
   border-radius: 12px;
   box-shadow: var(--shadow);
 }
-.htile, .tile, .box { padding: 8px 10px; min-width: 0; }
+.htile, .tile, .box { padding: 6px 8px; min-width: 0; }
 .k, .name { font-size: 13px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
 .top { display: flex; justify-content: space-between; align-items: baseline; gap: 6px; }
 .box h2 { margin: 0 0 4px; }
-.boxletter { font-size: 40px; line-height: 1; font-weight: 700; margin: 4px 0; }
+.boxname { font-size: 22px; line-height: 1.2; font-weight: 700; margin: 4px 0; }
+.boxpct { font-weight: 600; }
+.tag { display: inline-block; margin-left: 2px; padding: 0 5px; border: 1px solid var(--line); border-radius: 4px; font-size: 12px; font-weight: 600; line-height: 1.4; vertical-align: 2px; }
 .key { font-size: 22px; line-height: 1.15; font-weight: 700; }
 .key.sentence { font-size: 15px; font-weight: 600; }
 .keyline { display: flex; align-items: baseline; gap: 8px; margin: 4px 0; }
@@ -1379,10 +1415,10 @@ p { margin: 0; overflow-wrap: break-word; }
 .gauge { position: relative; height: 8px; margin: 8px 0 4px; background: var(--line); border-radius: 99px; }
 .gauge i { position: absolute; top: -3px; width: 4px; height: 14px; border-radius: 2px; background: var(--good); }
 .gauge.out i { background: var(--warn); }
-.pbar { display: flex; gap: 2px; width: 100%; margin-top: 8px; }
-.seg { display: flex; align-items: center; justify-content: center; min-width: max-content; min-height: 26px; padding: 2px 4px; color: #fff; font-size: 12px; font-weight: 600; border-radius: 4px; }
+.pbar { display: flex; flex-wrap: wrap; gap: 2px; width: 100%; margin-top: 8px; }
+.seg { display: flex; align-items: center; justify-content: center; flex: 1 1 auto; gap: 4px; min-width: max-content; min-height: 26px; padding: 2px 8px; color: #fff; font-size: 13px; font-weight: 600; border-radius: 4px; text-align: center; }
 .seg.b { background: #1f4d3a; flex-grow: 40; }
-.seg.d { background: #8a5a12; }
+.seg.d, .seg.dd { background: #8a5a12; }
 .seg.f { background: #2f4a6e; }
 .seg.c { background: #8a3a32; }
 .seg.a { background: #3e4a57; }
@@ -1395,7 +1431,7 @@ ul { margin: 0; padding: 0; list-style: none; }
 .clabel { flex: 1; }
 .mark { font-weight: 700; width: 1em; }
 .foot { margin-top: 8px; }
-.ev { display: grid; grid-template-columns: 108px minmax(0, 1fr) auto; gap: 8px; align-items: start; margin: 0; padding: 3px 0; background: transparent; border: 0; border-radius: 0; box-shadow: none; border-bottom: 1px solid var(--line); }
+.ev { display: grid; grid-template-columns: 108px minmax(0, 1fr) auto; gap: 4px; align-items: start; margin: 0; padding: 1px 0; background: transparent; border: 0; border-radius: 0; box-shadow: none; border-bottom: 1px solid var(--line); }
 .twhen b { display: block; font-size: 15px; }
 .etop { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .chip { display: inline-block; padding: 1px 8px; border-radius: 999px; background: var(--bg); color: var(--muted); font-size: 12px; font-weight: 600; }
@@ -1410,9 +1446,13 @@ ul { margin: 0; padding: 0; list-style: none; }
 .qcard { padding: 8px; }
 .qlabel { font-size: 13px; font-weight: 600; }
 table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+table.prices, table.prices th, table.prices td { font-size: 13px; line-height: 1.15; padding-top: 0; padding-bottom: 0; }
+table.legend, table.legend th, table.legend td { font-size: 13px; line-height: 1.25; padding-top: 1px; padding-bottom: 1px; }
+table.legend th:first-child, table.legend td:first-child { width: 22%; }
+table.legend th.num, table.legend td.num { width: 18%; }
 th, td { text-align: left; vertical-align: middle; padding: 1px 6px 1px 0; border-bottom: 1px solid var(--line); overflow-wrap: break-word; font-weight: 400; }
 th.num, td.num { text-align: right; }
-tr.group th { padding-top: 6px; font-size: 13px; font-weight: 600; color: var(--muted); letter-spacing: .04em; text-transform: uppercase; border-bottom: 0; }
+tr.group th { padding-top: 4px; font-size: 13px; font-weight: 600; color: var(--muted); letter-spacing: .04em; text-transform: uppercase; border-bottom: 0; }
 .spark { color: var(--muted); overflow: visible; vertical-align: middle; }
 button { background: var(--card); color: var(--ink); border: 1px solid var(--line); border-radius: 999px; font: inherit; font-weight: 600; padding: 4px 10px; }
 .tip { position: relative; }
