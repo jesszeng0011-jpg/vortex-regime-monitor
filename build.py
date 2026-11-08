@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from datetime import date, datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from html import escape
@@ -181,11 +182,10 @@ def tip(text: str, detail: str, kind: str = "") -> str:
     return f'<span class="{classes}" tabindex="0" data-tip="{esc(clean)}">{esc(text)}</span>'
 
 
-def spark(values: list[float]) -> str:
+def spark(values: list[float], width: int = 72, height: int = 16) -> str:
     vals = [value for value in values if value is not None]
     if len(vals) < 2:
         return ""
-    width, height = 72, 16
     lo, hi = min(vals), max(vals)
     span = hi - lo or 1
     last = len(vals) - 1
@@ -338,10 +338,12 @@ def visible_catalyst(event: dict, now: datetime) -> bool:
 
 
 def scorecard_open(event: dict, now: datetime) -> bool:
+    """Open only on the report's SGT day, through two days after the report time."""
     if not event.get("scorecard"):
         return False
     when = datetime.fromisoformat(event["when_sgt"])
-    return now <= when + timedelta(days=2)
+    start = when.astimezone(SGT).replace(hour=0, minute=0, second=0, microsecond=0)
+    return start <= now <= when + timedelta(days=2)
 
 
 def self_check() -> None:
@@ -368,14 +370,24 @@ def self_check() -> None:
     ]
     shown = [row["id"] for row in sample if visible_catalyst(row, now)]
     assert shown == ["a"]
-    page = f"Deploy fully ({PHRASE_DEPLOY}). Stop ({PHRASE_STOP}). {FOOTER}"
+    page = f"Deploy fully ({PHRASE_DEPLOY}). Stop ({PHRASE_STOP}). {FOOTER} Book beta 0.65"
     privacy_scan(page)
+    softbank = {"scorecard": True, "when_sgt": "2026-11-10T15:30:00+08:00"}
+    assert scorecard_open(softbank, now) is False
+    assert scorecard_open(softbank, datetime(2026, 11, 10, 8, 0, tzinfo=SGT)) is True
+    assert scorecard_open(softbank, datetime(2026, 11, 12, 16, 0, tzinfo=SGT)) is False
     try:
         privacy_scan(page + " extra " + "".join(chr(code) for code in (98, 101, 116, 97)))
     except SystemExit:
         pass
     else:
         raise SystemExit("privacy scan missed a stray phrase")
+    try:
+        privacy_scan(page + " " + "".join(chr(code) for code in (48, 46, 54, 53, 48, 57)))
+    except SystemExit:
+        pass
+    else:
+        raise SystemExit("privacy scan missed an unrounded figure")
 
 
 def _needles() -> list[str]:
@@ -404,10 +416,11 @@ def _needles() -> list[str]:
 
 def privacy_scan(html: str, layout: bool = False) -> None:
     cleaned = html
-    for phrase in (PHRASE_DEPLOY, PHRASE_STOP, PHRASE_BASE):
+    for phrase in (PHRASE_DEPLOY, PHRASE_STOP, PHRASE_BASE, "Book beta"):
         cleaned = cleaned.replace(phrase, "")
     lowered = cleaned.lower()
-    if "".join(chr(code) for code in (98, 101, 116, 97)) in lowered:
+    token = "".join(chr(code) for code in (98, 101, 116, 97))
+    if re.search(r"(?<![\w])" + token + r"(?![\w])", lowered):
         raise SystemExit("privacy scan found a phrase outside the December memo lines")
     for needle in _needles():
         if needle.lower() in lowered:
@@ -653,6 +666,7 @@ def build_view(bundle: dict) -> dict:
         "deploy_met": 0,
         "stop_hit": int(legs["money"] == "red") + int(hy_red),
         "hy_red": hy_red,
+        "book_beta": manual.get("book_beta"),
     }
 
 
@@ -667,12 +681,22 @@ def countdown(target: datetime, now: datetime) -> str:
     return f"in {hours}h"
 
 
-def tile(name: str, light: str, lines: list[str]) -> str:
+def move_class(value: float | None) -> str:
+    if value is None or value == 0:
+        return ""
+    return "up" if value > 0 else "down"
+
+
+def tile(name: str, light: str, key_html: str, change_html: str, body: str, to_red: str, key_class: str = "key") -> str:
     label = {"green": "Green", "yellow": "Yellow", "red": "Red", "missing": "Missing"}.get(light, light)
-    body = "".join(f"<p>{line}</p>" for line in lines)
+    change = f'<span class="chg">{change_html}</span>' if change_html else ""
     return (
-        f'<article class="tile"><div class="top"><b>{esc(name)}</b>'
-        f'<span class="lamp {esc(light)}">{esc(label)}</span></div>{body}</article>'
+        f'<article class="tile {esc(light)}">'
+        f'<div class="top"><span class="name">{esc(name)}</span><span class="lamp {esc(light)}">{esc(label)}</span></div>'
+        f'<div class="keyline"><span class="{esc(key_class)}">{key_html}</span>{change}</div>'
+        f'<div class="rest">{body}</div>'
+        f'<p class="to">to red: {to_red}</p>'
+        f"</article>"
     )
 
 
@@ -719,11 +743,18 @@ def inflation_tile(view: dict) -> str:
     else:
         missing.append("core is under 0.3%")
     missing.append("oil is under $100")
-    return tile("Inflation", view["legs"]["inflation"], [
-        "Core " + core_html + " · 2Y " + rate_html,
-        oil_html("Brent", "BZ=F", view["brent"], view["brent_px"]) + " · " + oil_html("WTI", "CL=F", view["wti"], view["wti_px"]),
-        "<span class='to'>to red: " + esc("; ".join(missing)) + ".</span>",
-    ])
+    brent_week = ret(view["brent"], 5) if view["brent"] else None
+    change = ""
+    if brent_week is not None:
+        change = tip(fmt_pct(brent_week), "Brent, five sessions.", move_class(brent_week))
+    return tile(
+        "Inflation",
+        view["legs"]["inflation"],
+        core_html,
+        change,
+        "2Y " + rate_html + "<br>" + oil_html("Brent", "BZ=F", view["brent"], view["brent_px"]) + " · " + oil_html("WTI", "CL=F", view["wti"], view["wti_px"]),
+        esc("; ".join(missing)) + ".",
+    )
 
 
 def growth_tile(view: dict) -> str:
@@ -751,21 +782,33 @@ def growth_tile(view: dict) -> str:
             f"FRED PAYEMS monthly change, thousands of persons. {fmt_day(pay[-2][0])} to {fmt_day(pay[-1][0])}.",
             "na" if view["pay_old"] else "",
         )
-    return tile("Growth", view["legs"]["growth"], [
-        "Claims " + claims_html + week,
+    delta = None
+    if view["claims_avg"] is not None and view["prev_claims"] is not None:
+        delta = view["claims_avg"] - view["prev_claims"]
+    change = week if delta is None else tip(f"{delta / 1000:+.1f}k", "Change in the 4-week average versus the prior week.", move_class(delta))
+    return tile(
+        "Growth",
+        view["legs"]["growth"],
+        claims_html,
+        change,
         "Payrolls " + pay_html,
-        "<span class='to'>to red: claims above 227k and payrolls below zero.</span>",
-    ])
+        "claims above 227k and payrolls below zero.",
+    )
 
 
 def rules_tile(view: dict) -> str:
     texas = view["texas"]
     kind = "na" if view["texas_old"] else ""
     line = tip(texas["line"], f"Manual {fmt_dt(datetime.fromisoformat(texas['asof_sgt']))}. {texas['source']}", kind)
-    return tile("AI rules", view["legs"]["rules"], [
+    return tile(
+        "AI rules",
+        view["legs"]["rules"],
         line,
-        "<span class='to'>to red: a signed ban in a major state, or a confirmed grid pause.</span>",
-    ])
+        "",
+        "",
+        "a signed ban in a major state, or a confirmed grid pause.",
+        key_class="key sentence",
+    )
 
 
 def ratio_bits(view: dict) -> tuple[str, str]:
@@ -786,7 +829,7 @@ def ratio_bits(view: dict) -> tuple[str, str]:
         + " A ratio, not a price difference. " + session_phrase(quotes["CRWV"]["bars"][-1])
     )
     html = tip(f"{vals[-1]:.2f}", detail) + spark(vals[-30:])
-    week_html = "" if week is None else " 1w " + tip(fmt_pct(week), "Five-session change in the NBIS/CRWV ratio.")
+    week_html = "" if week is None else tip(fmt_pct(week), "Five-session change in the NBIS/CRWV ratio.", move_class(week))
     return html, week_html
 
 
@@ -796,11 +839,14 @@ def money_tile(view: dict) -> str:
     y_html = tip(y["label"], f"Manual {fmt_dt(datetime.fromisoformat(y['asof_sgt']))}. {y['source']}", "na" if view["yield_old"] else "st-yellow")
     c_html = tip(c["label"], f"Manual {fmt_dt(datetime.fromisoformat(c['asof_sgt']))}. {c['source']}", "na" if view["cds_old"] else "")
     ratio, week = ratio_bits(view)
-    return tile("AI money", view["legs"]["money"], [
-        "Yield " + y_html + " · CDS " + c_html,
-        "NBIS/CRWV " + ratio + week,
-        "<span class='to'>to red: auction below 90% of par, or pulled, and a CRWV funding flag. Bids 19 Nov; no auction print yet.</span>",
-    ])
+    return tile(
+        "AI money",
+        view["legs"]["money"],
+        y_html,
+        week,
+        "CDS " + c_html + "<br>NBIS/CRWV " + ratio,
+        "auction below 90% of par, or pulled, and a CRWV funding flag. Bids 19 Nov; no auction print yet.",
+    )
 
 
 def demand_tile(view: dict) -> str:
@@ -842,11 +888,18 @@ def demand_tile(view: dict) -> str:
         one_m = "1m " + tip(DASH, "The manual note has no 1-month history.")
         one_w = ""
         mark = " manual"
-    return tile("AI demand", view["legs"]["demand"], [
-        f"H100 {h_html}{mark} · B200 {b_html}{mark}",
-        one_w + ((" · " + one_m) if one_w else one_m),
-        "<span class='to'>to red: a 20% monthly drop and a 2027 capex cut that cites demand. Yellow is a 10% monthly drop.</span>",
-    ])
+    h100_week = view["h100_1w"] if not view["rent_manual"] else None
+    change = ""
+    if h100_week is not None:
+        change = tip(fmt_pct(h100_week), "H100 index, about seven days.", move_class(h100_week))
+    return tile(
+        "AI demand",
+        view["legs"]["demand"],
+        h_html,
+        change,
+        f"B200 {b_html}{mark}" + ((" · " + one_m) if one_m else ""),
+        "a 20% monthly drop and a 2027 capex cut that cites demand. Yellow is a 10% monthly drop.",
+    )
 
 
 def json_manual_rents() -> dict:
@@ -868,44 +921,63 @@ def spill_tile(view: dict) -> str:
     else:
         sofr_html = tip(DASH, "FRED SOFR was not loaded or is old.")
     range_html = tip(DASH, "Official SOFR range bounds were not loaded. The above-range half is not treated as met.")
-    return tile("Spillover", view["legs"]["spill"], [
-        "HY " + hy_html + week_html,
+    hy_delta = None
+    if view["hy"] and len(view["hy"]) >= 6 and not view["hy_old"]:
+        hy_delta = view["hy"][-1][1] - view["hy"][-6][1]
+    change = week_html
+    if hy_delta is not None:
+        change = tip(fmt_bp(hy_delta), f"Change versus {fmt_day(view['hy'][-6][0])}.", move_class(hy_delta))
+    return tile(
+        "Spillover",
+        view["legs"]["spill"],
+        hy_html,
+        change,
         "SOFR " + sofr_html + " · range " + range_html,
-        "<span class='to'>to red: HY above 4.5% and SOFR above its official range. Yellow is HY above 4.0%.</span>",
-    ])
+        "HY above 4.5% and SOFR above its official range. Yellow is HY above 4.0%.",
+    )
 
 
 def checklist(view: dict) -> str:
     deploy = [
-        ("Oct core at or below 0.2% (10 Nov)", "pending"),
-        ("Fed signals an end, or flat 2027 dots (10 Dec)", "pending"),
-        ("Payrolls above zero (4 Dec)", "pending"),
-        ("CRWV yield falling and auction at or above 95% of par (19 Nov)", "pending"),
-        ("Nvidia orders intact (18 Nov)", "pending"),
+        ("Oct core at or below 0.2%", "10 Nov", "pending"),
+        ("Fed signals an end, or flat 2027 dots", "10 Dec", "pending"),
+        ("Payrolls above zero", "4 Dec", "pending"),
+        ("CRWV yield falling and auction at or above 95% of par", "19 Nov", "pending"),
+        ("Nvidia orders intact", "18 Nov", "pending"),
     ]
     stop = [
-        ("AI money leg red", "hit" if view["legs"]["money"] == "red" else "clear"),
-        ("HY OAS above 4.5%", "hit" if view["hy_red"] else "clear"),
+        ("AI money leg red", "live", "hit" if view["legs"]["money"] == "red" else "clear"),
+        ("HY OAS above 4.5%", "live", "hit" if view["hy_red"] else "clear"),
     ]
 
-    def mark(state: str) -> str:
+    def icon(state: str) -> str:
         if state == "met":
-            return '<span class="lamp green">met</span>'
-        if state == "hit":
-            return '<span class="lamp red">triggered</span>'
+            return '<span class="mark good">✓</span>'
+        if state in ("hit", "failed"):
+            return '<span class="mark bad">✗</span>'
         if state == "clear":
-            return '<span class="lamp green">clear</span>'
-        return '<span class="lamp missing">pending</span>'
+            return '<span class="mark good">✓</span>'
+        return '<span class="mark wait">○</span>'
 
-    left = "".join(f"<li>{mark(state)} {esc(text)}</li>" for text, state in deploy)
-    right = "".join(f"<li>{mark(state)} {esc(text)}</li>" for text, state in stop)
-    met = sum(1 for _, state in deploy if state == "met")
-    hit = sum(1 for _, state in stop if state == "hit")
+    def rows(items) -> str:
+        out = []
+        for text, when, state in items:
+            out.append(
+                f'<li class="crow">{icon(state)}<span class="clabel">{esc(text)}</span>'
+                f'<span class="cwhen">{esc(when)}</span></li>'
+            )
+        return "".join(out)
+
+    met = sum(1 for _, _, state in deploy if state == "met")
+    hit = sum(1 for _, _, state in stop if state == "hit")
+    def bar(done: int, total: int) -> str:
+        width = 0 if total == 0 else round(100 * done / total)
+        return f'<div class="prog"><i style="width:{width}%"></i></div>'
     return (
         f'<div class="box"><h2>Deploy fully ({esc(PHRASE_DEPLOY)})</h2>'
-        f"<p>{met}/5 met</p><ul>{left}</ul></div>"
+        f'<p class="count">{met}/5 met</p>{bar(met, 5)}<ul>{rows(deploy)}</ul></div>'
         f'<div class="box"><h2>Stop ({esc(PHRASE_STOP)})</h2>'
-        f"<p>{hit}/2 triggered</p><ul>{right}</ul></div>"
+        f'<p class="count">{hit}/2 triggered</p>{bar(hit, 2)}<ul>{rows(stop)}</ul></div>'
         f'<p class="foot">{esc(FOOTER)}</p>'
     )
 
@@ -938,6 +1010,27 @@ def reaction_text(hit: str, event: dict, view: dict) -> str:
     return f"{hit} {fmt_pct(change)}"
 
 
+def leg_chip(name: str) -> str:
+    low = name.lower()
+    kind = "rules"
+    if "money" in low:
+        kind = "money"
+    elif "demand" in low:
+        kind = "demand"
+    elif "inf" in low:
+        kind = "inflation"
+    elif "growth" in low:
+        kind = "growth"
+    return f'<span class="chip leg {kind}">{esc(name)}</span>'
+
+
+def split_when(label: str) -> tuple[str, str]:
+    parts = label.split(" ", 2)
+    if len(parts) >= 3:
+        return parts[0] + " " + parts[1], parts[2]
+    return label, ""
+
+
 def catalyst_block(view: dict) -> str:
     chunks = []
     for event in view["shown"]:
@@ -947,80 +1040,103 @@ def catalyst_block(view: dict) -> str:
             result_html = esc(result)
         else:
             result_html = '<span class="na">pending</span>'
-        hits = ", ".join(event["hits"]) if event["hits"] else DASH
-        line = (
-            f'<p class="day">{esc(event["label"])} · {esc(event["event"])} · {esc(event["leg"])} · '
-            f'{esc(hits)} · {result_html}</p>'
+        chips = "".join(f'<span class="chip">{esc(hit)}</span>' for hit in event["hits"]) or f'<span class="chip">{DASH}</span>'
+        day, clock = split_when(event["label"])
+        ready = ""
+        cards = ""
+        if event.get("scorecard"):
+            if scorecard_open(event, view["now"]):
+                cards = scorecard_html(event)
+            else:
+                ready = '<span class="ready">Scorecard ready · 3 questions</span>'
+        chunks.append(
+            f'<article class="ev"><div class="twhen"><b>{esc(day)}</b><span>{esc(clock)}</span></div>'
+            f'<div class="emain"><div class="etop"><b>{esc(event["event"])}</b>{leg_chip(event["leg"])}{chips}{ready}</div>{cards}</div>'
+            f'<div class="eresult">{result_html}</div></article>'
         )
-        extra = ""
-        if scorecard_open(event, view["now"]):
-            extra = scorecard_html(event)
-        chunks.append(line + extra)
     return "".join(chunks)
 
 
 def scorecard_html(event: dict) -> str:
-    op_line = "Op. income $ change vs interest $ change — pending. Green only if the operating-income dollar gain is larger."
+    op_note = "Pending. Green only if the operating-income dollar gain is larger."
     if event["id"] == "crwv-q3":
-        op_line += " Pre-report guide midpoints, not Q3 actuals: op. income +$102M vs interest +$260M, <span class=\"lamp red\">gap widening</span>."
+        op_body = (
+            esc(op_note + " Pre-report guide midpoints, not Q3 actuals: op. income +$102M vs interest +$260M, ")
+            + '<span class="lamp red">gap widening</span>.'
+        )
     else:
-        op_line = esc(op_line)
-    rows = [
-        esc("Interest vs guide — pending. Red if above the company guide."),
-        op_line if event["id"] == "crwv-q3" else op_line,
-        esc("Next 12 months — pending. Debt due versus cash plus undrawn facilities. 2027 plan: customer prepay, new debt, equity."),
-        esc("New rate at or above 15% is red, at or below 12% is green — pending. A capex cut for funding is red; for power or permits it is F. CDS over 48 hours: +100bp red, −100bp green — pending."),
+        op_body = esc(op_note)
+    cards = [
+        ("Interest vs guide", esc("Pending. Red if above the company guide."), "pending"),
+        ("Op. income $ vs interest $", op_body, "pending"),
+        ("Next 12 months", esc("Pending. Debt due vs cash and undrawn. 2027 plan: prepay, new debt, equity."), "pending"),
     ]
-    if event["id"] == "crwv-q3":
-        rows[1] = esc("Op. income $ change vs interest $ change — pending. Green only if the operating-income dollar gain is larger. Pre-report guide midpoints, not Q3 actuals: op. income +$102M vs interest +$260M, ") + '<span class="lamp red">gap widening</span>.'
-    return "".join(f'<p class="sub">{row}</p>' for row in rows)
+    # Rate, capex, and the 48-hour CDS rule stay with the scorecard once it opens.
+    extra = esc("New rate ≥15% red, ≤12% green. Capex cut for funding is red; for power or permits it is F. CDS 48h: +100bp red, −100bp green. Pending.")
+    body = "".join(
+        f'<article class="qcard"><p class="qlabel">{esc(title)}</p><p class="qstate na">{state}</p><p>{text}</p></article>'
+        for title, text, state in cards
+    )
+    return f'<div class="qcards">{body}</div><p class="ready">{extra}</p>'
+
+
+def price_cells(ticker: str, view: dict) -> str:
+    since = tip(DASH, "No catalyst in the list has occurred yet, so there is no post-event move.")
+    series = view["quotes"].get(ticker)
+    if not series:
+        blank = f"<td class='num na'>{DASH}</td>"
+        return f"<tr><td>{esc(ticker)}</td>{blank * 3}<td></td><td class='num'>{since}</td></tr>"
+    bars = series["bars"]
+    last = bars[-1]
+    one = ret(bars, 1)
+    five = ret(bars, 5)
+    price = tip(fmt_px(last["close"]), f"Yahoo Finance {ticker}. {session_phrase(last)}")
+    one_html = tip(fmt_pct(one), "Prior session to the latest session.", move_class(one)) if one is not None else tip(DASH, "No prior session.")
+    five_html = tip(fmt_pct(five), "Five sessions back to the latest session.", move_class(five)) if five is not None else tip(DASH, "Not enough sessions.")
+    line = spark([bar["close"] for bar in bars[-20:]], 72, 14)
+    return f"<tr><td>{esc(ticker)}</td><td class='num'>{price}</td><td class='num'>{one_html}</td><td class='num'>{five_html}</td><td>{line}</td><td class='num'>{since}</td></tr>"
 
 
 def price_table(view: dict) -> str:
-    rows = []
-    for ticker, role in PRICES:
-        series = view["quotes"].get(ticker)
-        if not series:
-            rows.append(f"<tr><td>{esc(ticker)}</td><td class='na'>{DASH}</td><td class='na'>{DASH}</td><td class='na'>{DASH}</td><td class='na'>{DASH}</td><td>{esc(role)}</td></tr>")
-            continue
-        bars = series["bars"]
-        last = bars[-1]
-        one = ret(bars, 1)
-        five = ret(bars, 5)
-        price = tip(fmt_px(last["close"]), f"Yahoo Finance {ticker}. {session_phrase(last)}")
-        one_html = tip(fmt_pct(one), "Prior session to the latest session.") if one is not None else tip(DASH, "No prior session.")
-        five_html = tip(fmt_pct(five), "Five sessions back to the latest session.") if five is not None else tip(DASH, "Not enough sessions.")
-        since = tip(DASH, "No catalyst in the list has occurred yet, so there is no post-event move.")
-        rows.append(f"<tr><td>{esc(ticker)}</td><td>{price}</td><td>{one_html}</td><td>{five_html}</td><td>{since}</td><td>{esc(role)}</td></tr>")
-    ratio, _week = ratio_bits(view)
-    since = tip(DASH, "No catalyst in the list has occurred yet.")
-    rows.append(f"<tr><td>NBIS/CRWV</td><td>{ratio}</td><td colspan='2'>1d and 5d are inside the ratio tip</td><td>{since}</td><td>money-leg pair</td></tr>")
-    # The colspan line is a bit awkward. Replace with explicit 1d/5d below by recomputing.
+    groups = [
+        ("B lead", ["SPY", "MSFT", "GOOGL", "AMZN"]),
+        ("Cut first", ["NVDA", "CRWV"]),
+        ("Hedges", ["XLP", "GLD", "XLE"]),
+    ]
+    body = []
+    for title, tickers in groups:
+        body.append(f'<tr class="group"><th colspan="6">{esc(title)}</th></tr>')
+        for ticker in tickers:
+            body.append(price_cells(ticker, view))
+    body.append('<tr class="group"><th colspan="6">Money-leg pair</th></tr>')
+    body.append(ratio_row(view))
     return (
-        "<table><thead><tr><th>Ticker</th><th>Price</th><th>1d</th><th>5d</th><th>Since last catalyst</th><th>Role</th></tr></thead>"
-        f"<tbody>{''.join(rows[:-1])}{ratio_row(view)}</tbody></table>"
+        "<table class='prices'><thead><tr><th>Ticker</th><th class='num'>Price</th><th class='num'>1d</th>"
+        "<th class='num'>5d</th><th>20d</th><th class='num'>Since last catalyst</th></tr></thead>"
+        f"<tbody>{''.join(body)}</tbody></table>"
     )
 
 
 def ratio_row(view: dict) -> str:
     quotes = view["quotes"]
     since = tip(DASH, "No catalyst in the list has occurred yet.")
+    empty = f"<tr><td>NBIS/CRWV</td><td class='num na'>{DASH}</td><td class='num na'>{DASH}</td><td class='num na'>{DASH}</td><td></td><td class='num'>{since}</td></tr>"
     if "NBIS" not in quotes or "CRWV" not in quotes:
-        return f"<tr><td>NBIS/CRWV</td><td class='na'>{DASH}</td><td class='na'>{DASH}</td><td class='na'>{DASH}</td><td>{since}</td><td>money-leg pair</td></tr>"
+        return empty
     left = {bar["session"]: bar["close"] for bar in quotes["NBIS"]["bars"]}
     right = {bar["session"]: bar["close"] for bar in quotes["CRWV"]["bars"]}
     dates = [day for day in sorted(set(left) & set(right)) if right[day]]
     vals = [left[day] / right[day] for day in dates]
     if len(vals) < 6:
-        return f"<tr><td>NBIS/CRWV</td><td class='na'>{DASH}</td><td class='na'>{DASH}</td><td class='na'>{DASH}</td><td>{since}</td><td>money-leg pair</td></tr>"
+        return empty
     one = vals[-1] / vals[-2] - 1
     five = vals[-1] / vals[-6] - 1
     detail = f"NBIS divided by CRWV on {fmt_day(dates[-1])}. A ratio, not a price difference."
     return (
-        f"<tr><td>NBIS/CRWV</td><td>{tip(f'{vals[-1]:.2f}', detail)}</td>"
-        f"<td>{tip(fmt_pct(one), 'One-session change in the ratio.')}</td>"
-        f"<td>{tip(fmt_pct(five), 'Five-session change in the ratio.')}</td>"
-        f"<td>{since}</td><td>money-leg pair</td></tr>"
+        f"<tr><td>NBIS/CRWV</td><td class='num'>{tip(f'{vals[-1]:.2f}', detail)}</td>"
+        f"<td class='num'>{tip(fmt_pct(one), 'One-session change in the ratio.', move_class(one))}</td>"
+        f"<td class='num'>{tip(fmt_pct(five), 'Five-session change in the ratio.', move_class(five))}</td>"
+        f"<td>{spark(vals[-20:], 72, 14)}</td><td class='num'>{since}</td></tr>"
     )
 
 
@@ -1051,51 +1167,104 @@ def changes_block(prior: dict | None, current: dict) -> str:
     return "".join(lines)
 
 
+BOX_NAME = {
+    "A": "Cooling expansion",
+    "B": "Sticky but viable",
+    "C": "Inflation squeeze",
+    "D": "AI retrenchment",
+    "D_money": "AI retrenchment, money",
+    "E": "Broad break",
+    "F": "Blocked buildout",
+}
+BANDS = {"B": (0.5, 0.75)}
+SEGMENTS = [
+    ("B", "B", "b"),
+    ("D_money", "D-money", "d"),
+    ("F", "F", "f"),
+    ("C", "C", "c"),
+    ("A", "A", "a"),
+    ("E", "E", "e"),
+]
+
+
 def prob_line(judgment: dict) -> str:
-    order = [("B", "B"), ("D_money", "D-money"), ("F", "F"), ("C", "C"), ("A", "A"), ("E", "E")]
     probs = judgment["probabilities"]
     prior = judgment.get("prior_probabilities") or {}
+    note = judgment.get("note", "")
     parts = []
-    weights = []
-    for key, label in order:
+    for key, label, kind in SEGMENTS:
         value = probs.get(key)
         if value is None:
-            parts.append(f"{label} {DASH}")
             continue
         arrow = ""
         if isinstance(prior, dict) and key in prior and isinstance(prior[key], (int, float)) and prior[key] != value:
             arrow = " ↑" if value > prior[key] else " ↓"
-        parts.append(f"{label} {value:g}{arrow}")
-        weights.append(value)
-    bar = "".join(f'<i style="flex:{weight}"></i>' for weight in weights)
-    note = judgment.get("note", "")
+        parts.append(f'<span class="seg {kind}" style="flex:{value}">{esc(label)} {value:g}{arrow}</span>')
+    return f'<div class="pbar" title="{esc(note)}">{"".join(parts)}</div>'
+
+
+def beta_tile(view: dict, judgment: dict) -> str:
+    raw = view.get("book_beta") or {}
+    value = raw.get("value")
+    if not isinstance(value, (int, float)):
+        return (
+            '<article class="htile"><p class="k">Book beta</p>'
+            f'<p class="key na">{DASH}</p></article>'
+        )
+    shown = f"{value:.2f}"
+    detail = f"Manual {fmt_dt(datetime.fromisoformat(raw['asof_sgt']))}. {raw.get('source', '')}"
+    number = tip(shown, detail, "")
+    box = judgment.get("current_box")
+    band = BANDS.get(box)
+    if not band:
+        gauge = '<p class="muted">no band for this box</p>'
+    else:
+        lo, hi = band
+        inside = lo <= value <= hi
+        pos = 0 if hi == lo else max(0, min(100, (value - lo) / (hi - lo) * 100))
+        state = "in" if inside else "out"
+        gauge = (
+            f'<div class="gauge {state}"><i style="left:{pos:.1f}%"></i></div>'
+            f'<p class="muted">{esc(box)} band {lo:.1f}–{hi:.2f}</p>'
+        )
     return (
-        f'<p class="probs">{tip(" · ".join(parts), note)}</p>'
-        f'<div class="meter" aria-hidden="true">{bar}</div>'
+        '<article class="htile"><p class="k">Book beta</p>'
+        f'<p class="key">{number} <span class="manual">manual</span></p>{gauge}</article>'
     )
 
 
 def page(view: dict, judgment: dict, changes_html: str) -> str:
     nxt = view["nxt"]
+    box = judgment.get("current_box", "B")
+    weight = judgment["probabilities"].get(box)
+    weight_txt = DASH if weight is None else f"{weight:g}%"
     if nxt:
         count = countdown(nxt["when"], view["now"])
         catalyst = (
-            f'{esc(nxt["event"])} · {esc(nxt["label"])} · '
-            f'<span id="count" data-target="{esc(nxt["when"].isoformat())}">{esc(count)}</span>'
+            f'<p class="ename">{esc(nxt["event"])}</p>'
+            f'<p class="muted">{esc(nxt["label"])}</p>'
+            f'<p class="countline" id="count" data-target="{esc(nxt["when"].isoformat())}">{esc(count)}</p>'
         )
     else:
-        catalyst = "none dated"
-    probs = judgment["probabilities"]
-    header = (
-        f'<p class="head">Box {esc(judgment["current_box"])} · {probs["B"]:g}% · '
-        f'<span class="lamp {esc(view["action"].lower())}">Action {esc(view["action"])}</span> · '
-        f'{esc(view["reason"])} · {catalyst}</p>'
-    )
+        catalyst = f'<p class="ename">{DASH}</p>'
     body = f"""
-    <header>
-      {header}
-      <button id="theme-toggle" type="button">Theme</button>
-    </header>
+    <section class="heroes">
+      <article class="htile">
+        <p class="k">Box</p>
+        <p class="boxletter">{esc(box)}</p>
+        <p>{esc(BOX_NAME.get(box, box))} · {esc(weight_txt)}</p>
+      </article>
+      <article class="htile">
+        <p class="k">Action</p>
+        <p class="badge {esc(view["action"].lower())}">{esc(view["action"])}</p>
+        <p>{esc(view["reason"])}</p>
+      </article>
+      {beta_tile(view, judgment)}
+      <article class="htile">
+        <div class="top"><p class="k">Next catalyst</p><button id="theme-toggle" type="button">Theme</button></div>
+        {catalyst}
+      </article>
+    </section>
     {prob_line(judgment)}
     <p class="note">HOLD and CUT are research labels, not instructions.</p>
     <h2>Legs</h2>
@@ -1110,11 +1279,11 @@ def page(view: dict, judgment: dict, changes_html: str) -> str:
     <h2>December checklist</h2>
     <section class="checks">{checklist(view)}</section>
     <h2>Next 14 days</h2>
-    <section>{catalyst_block(view)}</section>
+    <section class="timeline">{catalyst_block(view)}</section>
     <h2>Prices we act on</h2>
     {price_table(view)}
     <h2>Last 3 changes</h2>
-    <section>{changes_html}</section>
+    <section class="changes">{changes_html}</section>
     """
     return HTML_HEAD + body + HTML_FOOT
 
@@ -1125,6 +1294,9 @@ HTML_HEAD = """<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Vortex Regime Monitor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;600;700&family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
 <script>
 try {
   var saved = localStorage.getItem("vortex-theme");
@@ -1133,42 +1305,127 @@ try {
 } catch (e) {}
 </script>
 <style>
-:root { color-scheme: dark; --bg:#121418; --card:#1b1f25; --ink:#f3f0e8; --muted:#b7b1a6; --line:#343b44; --good:#3cba7a; --warn:#e0a33a; --bad:#e36b62; --stale:#9aa1a9; }
-[data-theme="light"] { color-scheme: light; --bg:#f4f1ea; --card:#fffdf8; --ink:#1c1915; --muted:#5f594e; --line:#e3ddd2; --good:#0d7a45; --warn:#8a5a00; --bad:#a33b34; --stale:#6c7278; }
+:root {
+  color-scheme: dark;
+  --bg: #0f1115;
+  --card: #16181d;
+  --ink: #f2f0ea;
+  --muted: #a1a6ad;
+  --line: #2c3138;
+  --good: #1f8a4c;
+  --warn: #c98a00;
+  --bad: #c0392b;
+  --stale: #9aa0a6;
+  --shadow: 0 1px 2px rgba(0, 0, 0, .35);
+}
+[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f5f3ee;
+  --card: #ffffff;
+  --ink: #1b1d21;
+  --muted: #6b7078;
+  --line: #e6e3dc;
+  --good: #1f8a4c;
+  --warn: #c98a00;
+  --bad: #c0392b;
+  --stale: #9aa0a6;
+  --shadow: 0 1px 2px rgba(27, 29, 33, .06);
+}
 * { box-sizing: border-box; }
 html, body { margin: 0; }
-body { background: var(--bg); color: var(--ink); font: 12.5px/1.3 ui-sans-serif, system-ui, sans-serif; font-variant-numeric: tabular-nums; }
-.page { width: min(1440px, 100%); margin: 0 auto; padding: 6px 10px 8px; }
-header { display: flex; gap: 8px; align-items: baseline; }
-.head { flex: 1; margin: 0; }
-h2 { margin: 7px 0 3px; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 650; }
-p { margin: 0 0 2px; overflow-wrap: break-word; }
-.note, .probs { color: var(--muted); margin: 1px 0 2px; }
-.meter { display: flex; height: 4px; gap: 2px; margin: 0 0 2px; }
-.meter i { display: block; background: var(--ink); opacity: .45; }
-.legs { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 6px; }
-.checks { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
-.tile, .box { border: 1px solid var(--line); background: var(--card); border-radius: 8px; padding: 5px 6px; min-width: 0; }
-.top { display: flex; justify-content: space-between; gap: 4px; align-items: baseline; }
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: Inter, "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  font-size: 15px;
+  line-height: 1.25;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+.page { max-width: 1280px; margin: 0 auto; padding: 8px 24px 4px; }
+.tools { display: flex; justify-content: flex-end; }
+h2 { margin: 6px 0 2px; font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+p { margin: 0; overflow-wrap: break-word; }
+.note { color: var(--muted); font-size: 13px; margin: 4px 0 0; }
+.heroes, .legs, .checks { display: grid; gap: 8px; }
+.heroes { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.legs { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+.checks { grid-template-columns: 1fr 1fr; }
+.htile, .tile, .box, .ev, .qcard {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+}
+.htile, .tile, .box { padding: 8px 10px; min-width: 0; }
+.k, .name { font-size: 13px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.top { display: flex; justify-content: space-between; align-items: baseline; gap: 6px; }
+.box h2 { margin: 0 0 4px; }
+.boxletter { font-size: 40px; line-height: 1; font-weight: 700; margin: 4px 0; }
+.key { font-size: 22px; line-height: 1.15; font-weight: 700; }
+.key.sentence { font-size: 15px; font-weight: 600; }
+.keyline { display: flex; align-items: baseline; gap: 8px; margin: 4px 0; }
+.badge { font-size: 22px; font-weight: 700; margin: 4px 0; }
+.manual { font-size: 13px; font-weight: 600; color: var(--muted); }
+.muted, .ready, .cwhen, .twhen span { color: var(--muted); font-size: 13px; }
 .lamp { font-weight: 700; }
-.lamp.yellow, .lamp.hold, .st-yellow { color: var(--warn); }
-.lamp.red, .lamp.cut, .st-red { color: var(--bad); }
-.lamp.green, .lamp.add { color: var(--good); }
-.lamp.missing, .na, .sub { color: var(--stale); }
-.to { color: var(--ink); }
-.sub { margin: 0 0 1px 10px; }
-ul { margin: 0; padding-left: 0; list-style: none; }
-li { margin: 0 0 1px; overflow-wrap: break-word; }
+.lamp.yellow, .badge.hold, .st-yellow, .gauge.out i { color: var(--warn); }
+.lamp.red, .badge.cut, .st-red, .down, .mark.bad { color: var(--bad); }
+.lamp.green, .badge.add, .st-green, .up, .mark.good { color: var(--good); }
+.lamp.missing, .na, .mark.wait { color: var(--stale); }
+.tile { display: flex; flex-direction: column; border-top-width: 4px; }
+.tile.green { border-top-color: #1f8a4c; }
+.tile.yellow { border-top-color: #c98a00; }
+.tile.red { border-top-color: #c0392b; }
+.tile.missing { border-top-color: #9aa0a6; }
+.rest { font-size: 13px; margin-top: 4px; }
+.to { margin-top: auto; padding-top: 4px; color: var(--muted); font-size: 13px; }
+.gauge { position: relative; height: 8px; margin: 8px 0 4px; background: var(--line); border-radius: 99px; }
+.gauge i { position: absolute; top: -3px; width: 4px; height: 14px; border-radius: 2px; background: var(--good); }
+.gauge.out i { background: var(--warn); }
+.pbar { display: flex; gap: 2px; width: 100%; margin-top: 8px; }
+.seg { display: flex; align-items: center; justify-content: center; min-width: max-content; min-height: 26px; padding: 2px 4px; color: #fff; font-size: 12px; font-weight: 600; border-radius: 4px; }
+.seg.b { background: #1f4d3a; flex-grow: 40; }
+.seg.d { background: #8a5a12; }
+.seg.f { background: #2f4a6e; }
+.seg.c { background: #8a3a32; }
+.seg.a { background: #3e4a57; }
+.seg.e { background: #5a4568; }
+.count { font-weight: 600; margin-bottom: 4px; }
+.prog { height: 6px; background: var(--line); border-radius: 99px; margin: 0 0 4px; }
+.prog i { display: block; height: 6px; background: var(--good); border-radius: 99px; }
+ul { margin: 0; padding: 0; list-style: none; }
+.crow { display: flex; gap: 8px; align-items: baseline; margin: 0 0 3px; }
+.clabel { flex: 1; }
+.mark { font-weight: 700; width: 1em; }
+.foot { margin-top: 8px; }
+.ev { display: grid; grid-template-columns: 108px minmax(0, 1fr) auto; gap: 8px; align-items: start; margin: 0; padding: 3px 0; background: transparent; border: 0; border-radius: 0; box-shadow: none; border-bottom: 1px solid var(--line); }
+.twhen b { display: block; font-size: 15px; }
+.etop { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.chip { display: inline-block; padding: 1px 8px; border-radius: 999px; background: var(--bg); color: var(--muted); font-size: 12px; font-weight: 600; }
+.chip.leg { color: #fff; }
+.chip.money { background: #8a5a12; }
+.chip.inflation { background: #8a3a32; }
+.chip.demand { background: #2f4a6e; }
+.chip.growth { background: #1f4d3a; }
+.chip.rules { background: #3e4a57; }
+.ready { margin-top: 4px; }
+.qcards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 8px; }
+.qcard { padding: 8px; }
+.qlabel { font-size: 13px; font-weight: 600; }
 table { width: 100%; border-collapse: collapse; table-layout: fixed; }
-th, td { text-align: left; vertical-align: top; padding: 1px 4px 1px 0; border-bottom: 1px solid var(--line); overflow-wrap: break-word; font-weight: 450; }
-.foot { margin-top: 4px; }
-button { background: transparent; color: var(--ink); border: 1px solid var(--line); border-radius: 999px; font: inherit; padding: 2px 8px; }
-.spark { display: block; color: var(--muted); overflow: visible; margin-top: 2px; }
+th, td { text-align: left; vertical-align: middle; padding: 1px 6px 1px 0; border-bottom: 1px solid var(--line); overflow-wrap: break-word; font-weight: 400; }
+th.num, td.num { text-align: right; }
+tr.group th { padding-top: 6px; font-size: 13px; font-weight: 600; color: var(--muted); letter-spacing: .04em; text-transform: uppercase; border-bottom: 0; }
+.spark { color: var(--muted); overflow: visible; vertical-align: middle; }
+button { background: var(--card); color: var(--ink); border: 1px solid var(--line); border-radius: 999px; font: inherit; font-weight: 600; padding: 4px 10px; }
 .tip { position: relative; }
-.tip:hover::after, .tip:focus::after { content: attr(data-tip); position: absolute; z-index: 5; left: 0; top: calc(100% + 4px); width: 240px; padding: 6px 8px; border-radius: 6px; background: var(--ink); color: var(--bg); font-size: 12px; line-height: 1.3; white-space: normal; }
+.tip:hover::after, .tip:focus::after { content: attr(data-tip); position: absolute; z-index: 5; left: 0; top: calc(100% + 4px); width: 240px; padding: 6px 8px; border-radius: 8px; background: var(--ink); color: var(--bg); font-size: 13px; line-height: 1.35; font-weight: 400; white-space: normal; }
+.ename { font-size: 22px; font-weight: 700; }
+.countline { font-size: 15px; font-weight: 600; }
 @media (max-width: 860px) {
-  .legs, .checks { grid-template-columns: 1fr; }
-  header { display: block; }
+  .heroes, .legs, .checks, .qcards, .ev { grid-template-columns: 1fr; }
+  .page { padding: 8px 16px 16px; }
 }
 </style>
 </head>

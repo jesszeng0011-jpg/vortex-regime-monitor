@@ -18,6 +18,12 @@
     "manual": true,
     "source": "Jess, 8 Nov 2026. Fallback only if the Silicon Data index pages do not parse. Not a live pull by itself."
   },
+  "book_beta": {
+    "value": 0.65,
+    "asof_sgt": "2026-11-08T20:55:00+08:00",
+    "manual": true,
+    "source": "Fund Assistant official, 8 Nov 2026. Manual on this page."
+  },
   "texas": {
     "asof_sgt": "2026-11-08T22:49:00+08:00",
     "line": "ERCOT report Dec 10 · decision Dec 17 (UV)",
