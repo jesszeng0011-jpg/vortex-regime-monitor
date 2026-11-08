@@ -1,8 +1,29 @@
 {
-  "asof_sgt": "2026-11-08T21:00:00+08:00",
-  "source": "Status notes in the 8 Nov 2026 public rebuild brief. Not a live statute or grid feed.",
-  "signed_state_bans": 0,
-  "grid_pause_confirmed": false,
-  "texas_status": "ERCOT verification report is due 10 Dec 2026. The Texas grid decision is listed for 17 Dec 2026 and is unconfirmed (UV).",
-  "tceq_note": "TCEQ permit pause also covers off-grid gas. That note is not scored as a confirmed grid pause."
+  "crwv_yield": {
+    "asof_sgt": "2026-11-06T16:00:00+08:00",
+    "label": ">16%",
+    "manual": true,
+    "source": "Jess, manual, 6 Nov 2026. CRWV 2031/2032 unsecured yield. Not a live trace."
+  },
+  "crwv_cds": {
+    "asof_sgt": "2026-11-06T16:00:00+08:00",
+    "label": "~1,155 bp",
+    "manual": true,
+    "source": "Jess, manual, 6 Nov 2026. No live public CDS print was loaded."
+  },
+  "silicon_data": {
+    "asof_sgt": "2026-11-08T22:49:00+08:00",
+    "h100_usd": 3.0,
+    "b200_usd": 6.81,
+    "manual": true,
+    "source": "Jess, 8 Nov 2026. Fallback only if the Silicon Data index pages do not parse. Not a live pull by itself."
+  },
+  "texas": {
+    "asof_sgt": "2026-11-08T22:49:00+08:00",
+    "line": "ERCOT report Dec 10 · decision Dec 17 (UV)",
+    "signed_ban": false,
+    "grid_pause_confirmed": false,
+    "manual": true,
+    "source": "8 Nov 2026 memo. The decision date is unconfirmed. No signed ban or confirmed grid pause is entered."
+  }
 }

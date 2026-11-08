@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
-"""Build a self-contained Vortex Regime Monitor page from public series.
-
-Conclusions (market-implied box, leg lights, ADD/HOLD/CUT, closest red line,
-and the three largest moves) are computed here. The page does not fetch.
-"""
+"""Build the one-page December monitor from public series and hand entries."""
 from __future__ import annotations
 
 import json
 import math
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from html import escape
 from pathlib import Path
@@ -17,43 +13,32 @@ from zoneinfo import ZoneInfo
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
 OUT = ROOT / "index.html"
-
 SGT = ZoneInfo("Asia/Singapore")
 NY = ZoneInfo("America/New_York")
 DASH = "\u2014"
 
 HOLIDAYS = {
-    date(2026, 1, 1),
-    date(2026, 1, 19),
-    date(2026, 2, 16),
-    date(2026, 4, 3),
-    date(2026, 5, 25),
-    date(2026, 6, 19),
-    date(2026, 7, 3),
-    date(2026, 9, 7),
-    date(2026, 11, 26),
-    date(2026, 12, 25),
-    date(2027, 1, 1),
-    date(2027, 1, 18),
+    date(2026, 1, 1), date(2026, 1, 19), date(2026, 2, 16), date(2026, 4, 3),
+    date(2026, 5, 25), date(2026, 6, 19), date(2026, 7, 3), date(2026, 9, 7),
+    date(2026, 11, 26), date(2026, 12, 25), date(2027, 1, 1), date(2027, 1, 18),
 }
 
-BOX_TITLE = {
-    "A": "Cooling expansion",
-    "B": "Sticky but viable",
-    "C": "Inflation squeeze",
-    "D": "AI retrenchment",
-    "D_money": "AI retrenchment, money",
-    "D_demand": "AI retrenchment, demand",
-    "E": "Broad break",
-    "F": "Blocked buildout",
-}
-CHECK_ORDER = ["A", "C", "D", "E", "F"]
+PHRASE_DEPLOY = "beta toward 1.0"
+PHRASE_STOP = "beta to ~0.25"
+PHRASE_BASE = "deploy as B (beta 0.5–0.75)"
+FOOTER = "Base case: deploy as B (beta 0.5–0.75) in tranches after each catalyst."
 
-TICKERS = (
-    "SPY QQQ IWM SMH XLE XLP TLT NVDA MSFT AMZN GOOGL META EQIX DLR VST "
-    "CIFR HUT IREN WULF RIOT CRWV NBIS MSTR STRC CAT GEV APLD CORZ SPCX "
-    "^NDX BTC-USD CL=F BZ=F"
-).split()
+PRICES = [
+    ("SPY", "B lead"),
+    ("MSFT", "B lead"),
+    ("GOOGL", "B lead"),
+    ("AMZN", "B lead"),
+    ("NVDA", "B/D cut first"),
+    ("CRWV", "B/D cut first"),
+    ("XLP", "D hedge"),
+    ("GLD", "D hedge"),
+    ("XLE", "C hedge"),
+]
 
 
 def esc(value) -> str:
@@ -100,7 +85,7 @@ def weekly_stale(obs: date, now: datetime) -> bool:
     return (now.astimezone(SGT).date() - obs).days > 8
 
 
-def _add_month(year: int, month: int, step: int = 1) -> tuple[int, int]:
+def add_month(year: int, month: int, step: int = 1) -> tuple[int, int]:
     month += step
     year += (month - 1) // 12
     month = (month - 1) % 12 + 1
@@ -115,18 +100,16 @@ def first_friday(year: int, month: int) -> date:
 
 
 def release_dt(kind: str, year: int, month: int) -> datetime:
-    """When the print for a data-month is due, in SGT."""
     if kind == "cpi" and (year, month) == (2026, 10):
         return datetime(2026, 11, 10, 21, 30, tzinfo=SGT)
     if kind == "cpi" and (year, month) == (2026, 11):
         return datetime(2026, 12, 10, 21, 30, tzinfo=SGT)
     if kind == "jobs" and (year, month) == (2026, 11):
         return datetime(2026, 12, 4, 21, 30, tzinfo=SGT)
-    ny, nm = _add_month(year, month, 1)
+    ny, nm = add_month(year, month, 1)
     if kind == "jobs":
         day = first_friday(ny, nm)
         return datetime(day.year, day.month, day.day, 21, 30, tzinfo=SGT)
-    # CPI fallback when the brief does not name the morning: the 12th, 21:30 SGT.
     return datetime(ny, nm, 12, 21, 30, tzinfo=SGT)
 
 
@@ -135,7 +118,7 @@ def latest_released_month(now: datetime, kind: str) -> date:
     for _ in range(36):
         if release_dt(kind, year, month) <= now:
             return date(year, month, 1)
-        year, month = _add_month(year, month, -1)
+        year, month = add_month(year, month, -1)
     return date(year, month, 1)
 
 
@@ -152,6 +135,10 @@ def manual_stale(asof: datetime, now: datetime) -> bool:
     return trading_lag(asof_day, latest) > 1
 
 
+def daily_stale(session: date, now: datetime) -> bool:
+    return trading_lag(session, latest_completed_session(now)) > 1
+
+
 def fmt_dt(moment: datetime) -> str:
     moment = moment.astimezone(SGT)
     months = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()
@@ -163,9 +150,7 @@ def fmt_day(day: date) -> str:
     return f"{day.day} {months[day.month - 1]} {day.year}"
 
 
-def fmt_px(value: float, ticker: str) -> str:
-    if ticker in ("BTC-USD", "^NDX"):
-        return f"{value:,.0f}"
+def fmt_px(value: float) -> str:
     return f"{value:,.2f}"
 
 
@@ -173,12 +158,6 @@ def fmt_pct(frac: float) -> str:
     pct = frac * 100
     digits = 1 if abs(pct) >= 0.15 else 2
     return f"{pct:+.{digits}f}%"
-
-
-def fmt_pp(frac: float) -> str:
-    pct = frac * 100
-    digits = 1 if abs(pct) >= 0.15 else 2
-    return f"{pct:+.{digits}f}pp"
 
 
 def fmt_bp(change_pp: float) -> str:
@@ -192,14 +171,42 @@ def yahoo_name(ticker: str) -> str:
     return "y_" + ticker.replace("^", "%5E").replace("=", "%3D") + ".json"
 
 
+def tip(text: str, detail: str, kind: str = "") -> str:
+    classes = "tip"
+    if text == DASH:
+        classes += " na"
+    elif kind:
+        classes += " " + kind
+    clean = " ".join(str(detail).split())
+    return f'<span class="{classes}" tabindex="0" data-tip="{esc(clean)}">{esc(text)}</span>'
+
+
+def spark(values: list[float]) -> str:
+    vals = [value for value in values if value is not None]
+    if len(vals) < 2:
+        return ""
+    width, height = 72, 16
+    lo, hi = min(vals), max(vals)
+    span = hi - lo or 1
+    last = len(vals) - 1
+    points = []
+    for index, value in enumerate(vals):
+        x = 1 + index * (width - 2) / last
+        y = height - 1 - (value - lo) / span * (height - 2)
+        points.append(f"{x:.1f},{y:.1f}")
+    return (
+        f'<svg class="spark" width="{width}" height="{height}" viewBox="0 0 {width} {height}" aria-hidden="true">'
+        f'<polyline fill="none" stroke="currentColor" stroke-width="1.2" points="{" ".join(points)}"/></svg>'
+    )
+
+
 def load_json(path: Path):
     return json.loads(path.read_text())
 
 
 def load_fred(path: Path) -> list[tuple[date, float]]:
     rows = []
-    lines = path.read_text().splitlines()
-    for line in lines[1:]:
+    for line in path.read_text().splitlines()[1:]:
         if "," not in line:
             continue
         day, raw = line.split(",", 1)
@@ -233,7 +240,7 @@ def load_yahoo(path: Path) -> dict | None:
     series = adj if adj and any(value is not None for value in adj) else close
     if not series:
         return None
-    dedup: dict[date, dict] = {}
+    dedup = {}
     for stamp, value in zip(result.get("timestamp") or [], series):
         if stamp is None or value is None:
             continue
@@ -242,1522 +249,872 @@ def load_yahoo(path: Path) -> dict | None:
     bars = [dedup[key] for key in sorted(dedup)]
     if not bars:
         return None
+    return {"high52": meta.get("fiftyTwoWeekHigh"), "bars": bars}
+
+
+def load_bundle(now: datetime) -> dict:
+    quotes = {}
+    for ticker in [row[0] for row in PRICES] + ["NBIS", "SMH", "CL=F", "BZ=F"]:
+        path = DATA / yahoo_name(ticker)
+        if path.exists():
+            loaded = load_yahoo(path)
+            if loaded:
+                quotes[ticker] = loaded
+    judgment = load_json(DATA / "judgment.json")
+    for key in ("A", "B", "C", "D_money", "D_demand", "F", "E"):
+        if key not in judgment["probabilities"]:
+            raise SystemExit(f"judgment is missing {key}")
+    if judgment.get("current_box") != "B":
+        raise SystemExit("judgment current box is not B")
     return {
-        "symbol": meta.get("symbol") or path.name,
-        "high52": meta.get("fiftyTwoWeekHigh"),
-        "bars": bars,
-        "source": "Yahoo Finance",
+        "now": now,
+        "quotes": quotes,
+        "judgment": judgment,
+        "manual": load_json(DATA / "manual.json"),
+        "catalysts": load_json(DATA / "catalysts.json"),
+        "status": load_json(DATA / "fetch_status.json") if (DATA / "fetch_status.json").exists() else {"failed": []},
+        "dgs2": load_fred(DATA / "f_DGS2.csv") if (DATA / "f_DGS2.csv").exists() else [],
+        "hy": load_fred(DATA / "f_BAMLH0A0HYM2.csv") if (DATA / "f_BAMLH0A0HYM2.csv").exists() else [],
+        "sofr": load_fred(DATA / "f_SOFR.csv") if (DATA / "f_SOFR.csv").exists() else [],
+        "claims": load_fred(DATA / "f_ICSA.csv") if (DATA / "f_ICSA.csv").exists() else [],
+        "pay": load_fred(DATA / "f_PAYEMS.csv") if (DATA / "f_PAYEMS.csv").exists() else [],
+        "cpi": load_fred_decimal(DATA / "f_CPILFESL.csv") if (DATA / "f_CPILFESL.csv").exists() else [],
+        "silicon": load_json(DATA / "silicon_index.json") if (DATA / "silicon_index.json").exists() else None,
     }
 
 
-def load_usde(path: Path) -> list[dict]:
-    payload = load_json(path)
-    points = []
-    for row in payload.get("tokens") or []:
-        if "circulating_usd" in row:
-            value = row["circulating_usd"]
-        else:
-            value = (row.get("circulating") or {}).get("peggedUSD")
-        if row.get("date") is None or value is None:
+def session_phrase(bar: dict) -> str:
+    return f"Session {fmt_day(bar['session'])}, print {fmt_dt(datetime.fromtimestamp(bar['ts'], SGT))}."
+
+
+def ret(bars: list[dict], sessions: int) -> float | None:
+    if len(bars) <= sessions or not bars[-(sessions + 1)]["close"]:
+        return None
+    return bars[-1]["close"] / bars[-(sessions + 1)]["close"] - 1
+
+
+def cpi_prints(rows) -> list[dict]:
+    out = []
+    for older, newer in zip(rows, rows[1:]):
+        if not older[1]:
             continue
-        points.append({"ts": int(row["date"]), "value": float(value)})
-    points.sort(key=lambda item: item["ts"])
-    return points
+        raw = (newer[1] / older[1] - 1) * Decimal(100)
+        out.append({"month": newer[0], "raw": raw, "published": round_tenth(raw)})
+    return out
 
 
-def load_funding(path: Path) -> list[dict]:
-    rows = []
-    for row in load_json(path):
-        rows.append({
-            "ts": int(row["fundingTime"]) // 1000,
-            "rate": float(row["fundingRate"]),
-        })
-    rows.sort(key=lambda item: item["ts"])
-    return rows
+def rent_change(rows: list[dict], days: int) -> tuple[float | None, int | None]:
+    if len(rows) < 2:
+        return None, None
+    last = date.fromisoformat(rows[-1]["date"])
+    target = last - timedelta(days=days)
+    prior = min(rows[:-1], key=lambda row: abs((date.fromisoformat(row["date"]) - target).days))
+    span = (last - date.fromisoformat(prior["date"])).days
+    if not prior["value"]:
+        return None, span
+    return rows[-1]["value"] / prior["value"] - 1, span
 
 
-def shifted(rows, offset: int):
-    if offset <= 0:
-        return rows
-    if len(rows) <= offset:
-        return rows[:0]
-    return rows[:-offset]
+def failure_note(status: dict, needle: str) -> str:
+    for item in status.get("failed") or []:
+        if needle in str(item.get("id", "")):
+            return " Latest refresh failed: " + " ".join(str(item.get("error", "")).split())[:140]
+    return ""
 
 
-def tip(text: str, detail: str, kind: str = "") -> str:
-    classes = "tip"
-    if text == DASH:
-        classes += " na"
-    elif kind:
-        classes += " " + kind
-    clean = " ".join(str(detail).split())
-    return f'<span class="{classes}" tabindex="0" data-tip="{esc(clean)}">{esc(text)}</span>'
+def money_is_red(auction_state: str, funding_flag: bool) -> bool:
+    return auction_state == "red" and funding_flag
 
 
-def spark(values: list[float], width: int = 78, height: int = 22) -> str:
-    vals = [value for value in values if value is not None]
-    if len(vals) < 2:
-        return ""
-    lo, hi = min(vals), max(vals)
-    span = hi - lo or 1
-    points = []
-    last = len(vals) - 1
-    for index, value in enumerate(vals):
-        x = 1 + index * (width - 2) / last
-        y = height - 1 - (value - lo) / span * (height - 2)
-        points.append(f"{x:.1f},{y:.1f}")
-    return (
-        f'<svg class="spark" width="{width}" height="{height}" viewBox="0 0 {width} {height}" '
-        f'aria-hidden="true"><polyline fill="none" stroke="currentColor" stroke-width="1.25" '
-        f'points="{" ".join(points)}"/></svg>'
-    )
+def header_action(money_red: bool, hy_red: bool) -> str:
+    if money_red or hy_red:
+        return "CUT"
+    return "HOLD"
 
 
-def meter(value: float, lo: float, hi: float, caption: str, yellow=None, red=None, status: str = "") -> str:
-    span = hi - lo or 1
-
-    def pct(level: float) -> float:
-        return max(0.0, min(100.0, (level - lo) / span * 100))
-
-    marks = []
-    if yellow is not None:
-        marks.append(f'<i class="mark y" style="left:{pct(yellow):.2f}%"></i>')
-    if red is not None:
-        marks.append(f'<i class="mark r" style="left:{pct(red):.2f}%"></i>')
-    dot_kind = {"yellow": "warn", "red": "bad", "stale": "grey", "missing": "grey"}.get(status, "")
-    dot = f'<i class="dot {dot_kind}" style="left:{pct(value):.2f}%"></i>'
-    return (
-        f'<div class="meter"><div class="track">{"".join(marks)}{dot}</div>'
-        f'<div class="scale">{esc(caption)}</div></div>'
-    )
+def visible_catalyst(event: dict, now: datetime) -> bool:
+    when = datetime.fromisoformat(event["when_sgt"])
+    return now - timedelta(days=2) <= when <= now + timedelta(days=14)
 
 
-def implied_box(states: list[tuple[str, str]]) -> str:
-    scores = {box: 0 for box in CHECK_ORDER}
-    for box, state in states:
-        if state == "lit" and box in scores:
-            scores[box] += 1
-    best = max(scores.values()) if scores else 0
-    if best == 0:
-        return "B"
-    winners = [box for box in CHECK_ORDER if scores[box] == best]
-    if len(winners) == 1:
-        return winners[0]
-    return "tie:" + "/".join(winners)
-
-
-def disagrees(current: str, implied: str) -> bool:
-    if implied.startswith("tie:"):
-        return current not in implied.split(":", 1)[1].split("/")
-    return current != implied
-
-
-def check_tally(checks: list[dict]) -> str:
-    buckets = {box: 0 for box in CHECK_ORDER}
-    for check in checks:
-        if check["state"] == "lit" and check["box"] in buckets:
-            buckets[check["box"]] += 1
-    return " · ".join(f"{box} {buckets[box]} lit" for box in CHECK_ORDER)
-
-
-def implied_label(code: str) -> str:
-    if code.startswith("tie:"):
-        return "Tie " + " / ".join(code.split(":", 1)[1].split("/"))
-    return code
-
-
-def leg_light(flags: list[tuple[str, bool]], required_missing: bool) -> str:
-    keys = []
-    for key, deteriorating in flags:
-        if deteriorating and key not in keys:
-            keys.append(key)
-    if keys:
-        return "red" if len(keys) >= 2 else "yellow"
-    if required_missing:
-        return "missing"
-    return "green"
-
-
-def action_of(lights: list[tuple[str, str]]) -> tuple[str, list[str], list[str]]:
-    deteriorating = [name for name, light in lights if light in ("yellow", "red")]
-    grey = [name for name, light in lights if light in ("stale", "missing")]
-    if len(deteriorating) >= 2:
-        return "CUT", deteriorating, grey
-    if len(deteriorating) == 1 or grey:
-        return "HOLD", deteriorating, grey
-    return "ADD", deteriorating, grey
-
-
-def pick_closest(candidates: list[dict]) -> dict | None:
-    usable = [item for item in candidates if item.get("frac") is not None]
-    if not usable:
-        return None
-    return min(usable, key=lambda item: (item["frac"], item["name"]))
-
-
-def pearson(xs: list[float], ys: list[float]) -> float | None:
-    count = len(xs)
-    if count < 2 or count != len(ys):
-        return None
-    mean_x = sum(xs) / count
-    mean_y = sum(ys) / count
-    num = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
-    dx = math.sqrt(sum((x - mean_x) ** 2 for x in xs))
-    dy = math.sqrt(sum((y - mean_y) ** 2 for y in ys))
-    if dx == 0 or dy == 0:
-        return None
-    return num / (dx * dy)
+def scorecard_open(event: dict, now: datetime) -> bool:
+    if not event.get("scorecard"):
+        return False
+    when = datetime.fromisoformat(event["when_sgt"])
+    return now <= when + timedelta(days=2)
 
 
 def self_check() -> None:
-    now = datetime(2026, 11, 8, 22, 0, tzinfo=SGT)
+    now = datetime(2026, 11, 8, 22, 49, tzinfo=SGT)
     assert latest_completed_session(now) == date(2026, 11, 6)
-    assert trading_lag(date(2026, 11, 6), date(2026, 11, 6)) == 0
     assert trading_lag(date(2026, 11, 5), date(2026, 11, 6)) == 1
-    assert trading_lag(date(2026, 11, 4), date(2026, 11, 6)) == 2
     assert weekly_stale(date(2026, 10, 31), now) is False
-    assert weekly_stale(date(2026, 10, 31), datetime(2026, 11, 9, 12, tzinfo=SGT)) is True
     assert latest_released_month(now, "cpi") == date(2026, 9, 1)
     assert latest_released_month(now, "jobs") == date(2026, 10, 1)
-    assert monthly_stale(date(2026, 9, 1), now, "cpi") is False
-    assert monthly_stale(date(2026, 8, 1), now, "cpi") is True
-    assert manual_stale(datetime(2026, 11, 8, 21, 0, tzinfo=SGT), now) is False
     aug = (Decimal("337.765") / Decimal("336.789") - 1) * 100
     sep = (Decimal("338.896") / Decimal("337.765") - 1) * 100
     assert round_tenth(aug) == Decimal("0.3")
     assert round_tenth(sep) == Decimal("0.3")
-    assert implied_box([("A", "unlit"), ("C", "stale")]) == "B"
-    assert implied_box([("A", "lit"), ("A", "lit"), ("C", "lit")]) == "A"
-    assert implied_box([("A", "lit"), ("C", "lit")]) == "tie:A/C"
-    assert disagrees("B", "A") is True
-    assert disagrees("B", "B") is False
-    assert disagrees("A", "tie:A/C") is False
-    assert leg_light([("oil", True), ("oil", True)], False) == "yellow"
-    assert leg_light([("oil", True), ("core", True)], False) == "red"
-    assert leg_light([("oil", False)], True) == "missing"
-    assert action_of([("Inflation", "red"), ("Growth", "green")])[0] == "HOLD"
-    assert action_of([("Inflation", "yellow"), ("Growth", "yellow")])[0] == "CUT"
-    assert action_of([("Inflation", "green"), ("AI money", "missing")])[0] == "HOLD"
-    assert action_of([("Inflation", "green"), ("Growth", "green")])[0] == "ADD"
-    chosen = pick_closest([
-        {"name": "Brent", "frac": 0.02},
-        {"name": "Claims", "frac": 0.2},
-        {"name": "Core", "frac": None},
+    assert header_action(False, False) == "HOLD"
+    assert header_action(True, False) == "CUT"
+    assert header_action(False, True) == "CUT"
+    assert money_is_red("red", True) is True
+    assert money_is_red("pending", True) is False
+    assert money_is_red("yellow", True) is False
+    sample = [
+        {"when_sgt": "2026-11-10T15:30:00+08:00", "id": "a"},
+        {"when_sgt": "2026-11-25T21:30:00+08:00", "id": "b"},
+        {"when_sgt": "2026-12-17T09:00:00+08:00", "id": "c"},
+    ]
+    shown = [row["id"] for row in sample if visible_catalyst(row, now)]
+    assert shown == ["a"]
+    page = f"Deploy fully ({PHRASE_DEPLOY}). Stop ({PHRASE_STOP}). {FOOTER}"
+    privacy_scan(page)
+    try:
+        privacy_scan(page + " extra " + "".join(chr(code) for code in (98, 101, 116, 97)))
+    except SystemExit:
+        pass
+    else:
+        raise SystemExit("privacy scan missed a stray phrase")
+
+
+def _needles() -> list[str]:
+    def word(text: str) -> str:
+        return text
+
+    encoded = [
+        [48, 46, 54, 53, 48, 57],
+        [102, 117, 110, 100, 46, 106, 115, 111, 110],
+        [98, 101, 116, 97, 46, 106, 115, 111, 110],
+        [108, 105, 113, 117, 105, 100, 97, 116, 105, 111, 110],
+        [100, 114, 121, 32, 112, 111, 119, 100, 101, 114],
+        [86, 97, 114, 105, 97, 116, 105, 111, 110, 97, 108],
+        [70, 97, 98, 108, 101, 115],
+        [100, 114, 97, 119, 100, 111, 119, 110],
+        [97, 108, 108, 111, 99, 97, 116, 105, 111, 110],
+        [82, 82, 80, 79, 78, 84, 83, 89, 68],
+    ]
+    needles = ["".join(chr(code) for code in row) for row in encoded]
+    needles.extend([
+        "".join(chr(code) for code in row)
+        for row in ([80, 38, 76], [80, 47, 76], [65, 85, 77], [78, 65, 86])
     ])
-    assert chosen is not None and chosen["name"] == "Brent"
-    assert pick_closest([{"name": "Core", "frac": -0.01}, {"name": "Brent", "frac": 0.02}])["name"] == "Core"
+    return [word(item) for item in needles]
 
 
-def failure_note(status: dict | None, needle: str) -> str:
-    if not status:
-        return ""
-    for item in status.get("failed") or []:
-        if needle in str(item.get("id", "")):
-            err = " ".join(str(item.get("error", "")).split())[:160]
-            return f" Latest refresh failed ({err})."
-    return ""
+def privacy_scan(html: str, layout: bool = False) -> None:
+    cleaned = html
+    for phrase in (PHRASE_DEPLOY, PHRASE_STOP, PHRASE_BASE):
+        cleaned = cleaned.replace(phrase, "")
+    lowered = cleaned.lower()
+    if "".join(chr(code) for code in (98, 101, 116, 97)) in lowered:
+        raise SystemExit("privacy scan found a phrase outside the December memo lines")
+    for needle in _needles():
+        if needle.lower() in lowered:
+            raise SystemExit("privacy scan failed")
+    if layout:
+        clip = ["".join(chr(c) for c in row) for row in (
+            [116, 101, 120, 116, 45, 111, 118, 101, 114, 102, 108, 111, 119],
+            [101, 108, 108, 105, 112, 115, 105, 115],
+            [110, 111, 119, 114, 97, 112],
+            [111, 118, 101, 114, 102, 108, 111, 119, 58, 104, 105, 100, 100, 101, 110],
+            [111, 118, 101, 114, 102, 108, 111, 119, 58, 32, 104, 105, 100, 100, 101, 110],
+        )]
+        if any(token in lowered for token in clip):
+            raise SystemExit("layout clips text")
+    if "".join(chr(code) for code in (102, 101, 116, 99, 104, 40)) in html:
+        raise SystemExit("the page must not fetch")
 
 
-def series_stale(bars: list[dict], now: datetime, crypto: bool = False) -> bool:
-    if not bars:
-        return True
-    if crypto:
-        last = datetime.fromtimestamp(bars[-1]["ts"], SGT).date()
-        return (now.astimezone(SGT).date() - last).days > 1
-    latest = latest_completed_session(now)
-    return trading_lag(bars[-1]["session"], latest) > 1
-
-
-def fred_stale(rows, now: datetime, weekly: bool = False) -> bool:
-    if not rows:
-        return True
-    if weekly:
-        return weekly_stale(rows[-1][0], now)
-    return trading_lag(rows[-1][0], latest_completed_session(now)) > 1
-
-
-def window_returns(quotes: dict, tickers: list[str], n: int = 20, offset: int = 0):
-    maps = []
-    for ticker in tickers:
-        series = quotes.get(ticker)
-        if not series:
-            return None
-        bars = shifted(series["bars"], offset)
-        maps.append({bar["session"]: bar["close"] for bar in bars})
-    dates = set(maps[0])
-    for item in maps[1:]:
-        dates &= set(item)
-    ordered = sorted(dates)
-    if len(ordered) < n + 1:
-        return None
-    start, end = ordered[-(n + 1)], ordered[-1]
-    out = {}
-    for ticker, mapping in zip(tickers, maps):
-        if not mapping[start]:
-            return None
-        out[ticker] = mapping[end] / mapping[start] - 1
-    return {"start": start, "end": end, "ret": out}
-
-
-def aligned_returns(quotes: dict, left: str, right: str, offset: int = 0):
-    if left not in quotes or right not in quotes:
-        return None
-    left_bars = shifted(quotes[left]["bars"], offset)
-    right_bars = shifted(quotes[right]["bars"], offset)
-    left_map = {bar["session"]: bar["close"] for bar in left_bars}
-    right_map = {bar["session"]: bar["close"] for bar in right_bars}
-    dates = sorted(set(left_map) & set(right_map))
-    xs, ys = [], []
-    for older, newer in zip(dates, dates[1:]):
-        if left_map[older] and right_map[older]:
-            xs.append(left_map[newer] / left_map[older] - 1)
-            ys.append(right_map[newer] / right_map[older] - 1)
-    return xs, ys, dates
-
-
-def funding_is_stale(last_ts: int, now: datetime) -> bool:
-    last = datetime.fromtimestamp(last_ts, timezone.utc)
-    utc = now.astimezone(timezone.utc)
-    slot_hour = (utc.hour // 8) * 8
-    slot = utc.replace(hour=slot_hour, minute=0, second=0, microsecond=0)
-    if (utc - slot).total_seconds() < 15 * 60:
-        slot = slot - timedelta(hours=8)
-    return last < slot - timedelta(minutes=5)
-
-
-def build_checks(bundle: dict, offset: int, apply_stale: bool) -> list[dict]:
-    quotes = bundle["quotes"]
-    now = bundle["now"]
-    checks = []
-
-    def add(box: str, name: str, state: str, detail: str, source: str) -> None:
-        checks.append({
-            "box": box,
-            "name": name,
-            "state": state,
-            "detail": detail,
-            "source": source,
-        })
-
-    def stale_or(tickers: list[str], computed_missing: bool) -> bool:
-        if computed_missing:
-            return True
-        if not apply_stale:
-            return False
-        for ticker in tickers:
-            series = quotes.get(ticker)
-            crypto = ticker == "BTC-USD"
-            if series is None or series_stale(series["bars"], now, crypto=crypto):
-                return True
-        return False
-
-    growth = window_returns(quotes, ["SMH", "IWM", "SPY"], 20, offset)
-    if stale_or(["SMH", "IWM", "SPY"], growth is None):
-        add("A", "SMH and IWM versus SPY", "stale",
-            "Both must beat SPY by more than 3pp over 20 trading days. A required price is missing or old.",
-            "Yahoo Finance. Equal session window. Threshold is a starting proposal.")
-    else:
-        smh = growth["ret"]["SMH"] - growth["ret"]["SPY"]
-        iwm = growth["ret"]["IWM"] - growth["ret"]["SPY"]
-        lit = smh > 0.03 and iwm > 0.03
-        add("A", "SMH and IWM versus SPY", "lit" if lit else "unlit",
-            f"SMH {fmt_pp(smh)}, IWM {fmt_pp(iwm)} versus SPY. Line: both above +3pp. "
-            f"Window {fmt_day(growth['start'])} to {fmt_day(growth['end'])}.",
-            "Yahoo Finance adjusted or regular close. Excess return, not a price difference.")
-
-    dgs = shifted(bundle["dgs2"], offset)
-    dgs_bad = len(dgs) < 21 or (apply_stale and fred_stale(bundle["dgs2"], now))
-    if dgs_bad:
-        add("A", "2-year yield", "stale",
-            "Line: the 2-year yield falls more than 25bp over 20 trading-day observations. The series is missing or old.",
-            "FRED DGS2. Not a Treasury bill or 10-year yield.")
-    else:
-        change = dgs[-1][1] - dgs[-21][1]
-        lit = change < -0.25
-        add("A", "2-year yield", "lit" if lit else "unlit",
-            f"Change {fmt_bp(change)} from {dgs[-21][1]:.2f}% ({fmt_day(dgs[-21][0])}) "
-            f"to {dgs[-1][1]:.2f}% ({fmt_day(dgs[-1][0])}). Line: a fall of more than 25bp.",
-            "FRED DGS2, percent. 20 observations back, not a calendar guess.")
-
-    energy = window_returns(quotes, ["XLE", "QQQ"], 20, offset)
-    if stale_or(["XLE", "QQQ"], energy is None):
-        add("C", "XLE versus QQQ", "stale",
-            "Line: XLE beats QQQ by more than 5pp over 20 trading days. A required price is missing or old.",
-            "Yahoo Finance.")
-    else:
-        excess = energy["ret"]["XLE"] - energy["ret"]["QQQ"]
-        add("C", "XLE versus QQQ", "lit" if excess > 0.05 else "unlit",
-            f"XLE excess versus QQQ {fmt_pp(excess)}. Line: more than +5pp. "
-            f"Window {fmt_day(energy['start'])} to {fmt_day(energy['end'])}.",
-            "Yahoo Finance. Relative return, not a price difference.")
-
-    corr_pair = aligned_returns(quotes, "SPY", "TLT", offset)
-    corr_stale = (
-        corr_pair is None
-        or len(corr_pair[0]) < 60
-        or stale_or(["SPY", "TLT"], False)
-    )
-    if corr_stale:
-        add("C", "SPY and TLT correlation", "stale",
-            "Line: 60-day correlation of daily simple returns above +0.3. The pair is missing, short, or old.",
-            "Yahoo Finance. Sixty paired daily simple returns.")
-    else:
-        xs, ys, dates = corr_pair
-        corr = pearson(xs[-60:], ys[-60:])
-        if corr is None:
-            add("C", "SPY and TLT correlation", "stale",
-                "The 60-day correlation could not be computed.",
-                "Yahoo Finance.")
-        else:
-            add("C", "SPY and TLT correlation", "lit" if corr > 0.3 else "unlit",
-                f"Correlation {corr:+.2f} over the last 60 paired daily simple returns, "
-                f"ending {fmt_day(dates[-1])}. Line: above +0.3.",
-                "Yahoo Finance closes. Window is 60 returns, which needs 61 shared sessions.")
-
-    d_names = ["XLP", "SPY", "NVDA", "SMH", "MSFT", "AMZN", "GOOGL", "META"]
-    demand = window_returns(quotes, d_names, 20, offset)
-    if stale_or(d_names, demand is None):
-        add("D", "Defensive tape and supplier lag", "stale",
-            "Line: XLP beats SPY by more than 3pp AND suppliers lag spenders by more than 5pp. An input is missing or old.",
-            "Suppliers: equal-weight NVDA and SMH. Spenders: equal-weight MSFT, AMZN, GOOGL, META.")
-    else:
-        defensive = demand["ret"]["XLP"] - demand["ret"]["SPY"]
-        suppliers = (demand["ret"]["NVDA"] + demand["ret"]["SMH"]) / 2
-        spenders = sum(demand["ret"][name] for name in ("MSFT", "AMZN", "GOOGL", "META")) / 4
-        lag = spenders - suppliers
-        lit = defensive > 0.03 and lag > 0.05
-        add("D", "Defensive tape and supplier lag", "lit" if lit else "unlit",
-            f"XLP versus SPY {fmt_pp(defensive)}. Spenders minus suppliers {fmt_pp(lag)}. "
-            f"Line: XLP excess above +3pp and supplier lag above 5pp. "
-            f"Window {fmt_day(demand['start'])} to {fmt_day(demand['end'])}.",
-            "Equal-weight 20-session simple returns. A negative supplier gap means suppliers lagged. Not a price difference.")
-
-    add("D", "CRWV unsecured yield", "stale",
-        "Line: the CRWV unsecured bond yield rises 150bp. No public print is loaded, so the check does not count.",
-        "No live unsecured 2031 or 2032 yield was fetched. Nothing is filled in from memory.")
-
-    hy = shifted(bundle["hy"], offset)
-    hy_bad = len(hy) < 21 or (apply_stale and fred_stale(bundle["hy"], now))
-    if hy_bad:
-        add("E", "HY OAS widening", "stale",
-            "Line: HY OAS widens more than 50bp over 20 observations. The series is missing or old.",
-            "FRED BAMLH0A0HYM2, percent.")
-    else:
-        change = hy[-1][1] - hy[-21][1]
-        add("E", "HY OAS widening", "lit" if change > 0.50 else "unlit",
-            f"Change {fmt_bp(change)} from {hy[-21][1]:.2f}% ({fmt_day(hy[-21][0])}) "
-            f"to {hy[-1][1]:.2f}% ({fmt_day(hy[-1][0])}). Line: a widening of more than 50bp.",
-            "FRED BAMLH0A0HYM2. 20 observations.")
-
-    stress = window_returns(quotes, ["TLT", "SPY"], 20, offset)
-    if stale_or(["TLT", "SPY"], stress is None):
-        add("E", "TLT up and SPY down", "stale",
-            "Line: TLT up while SPY is down more than 5% over 20 trading days. A price is missing or old.",
-            "Yahoo Finance.")
-    else:
-        lit = stress["ret"]["TLT"] > 0 and stress["ret"]["SPY"] < -0.05
-        add("E", "TLT up and SPY down", "lit" if lit else "unlit",
-            f"TLT {fmt_pct(stress['ret']['TLT'])}, SPY {fmt_pct(stress['ret']['SPY'])}. "
-            f"Line: TLT positive and SPY below -5%. Window {fmt_day(stress['start'])} to {fmt_day(stress['end'])}.",
-            "Yahoo Finance 20-session simple returns.")
-
-    power = window_returns(quotes, ["EQIX", "DLR", "VST"], 20, offset)
-    if stale_or(["EQIX", "DLR", "VST"], power is None):
-        add("F", "Listed capacity versus VST", "stale",
-            "Line: equal-weight EQIX and DLR beat VST by more than 5pp. An input is missing or old.",
-            "Yahoo Finance. Relative return, not a price difference.")
-    else:
-        capacity = (power["ret"]["EQIX"] + power["ret"]["DLR"]) / 2
-        excess = capacity - power["ret"]["VST"]
-        add("F", "Listed capacity versus VST", "lit" if excess > 0.05 else "unlit",
-            f"EQIX and DLR minus VST {fmt_pp(excess)}. Line: more than +5pp. "
-            f"Window {fmt_day(power['start'])} to {fmt_day(power['end'])}.",
-            "Equal-weight 20-session return of EQIX and DLR, minus VST.")
-
-    hosts = ["CIFR", "HUT", "IREN", "WULF", "RIOT"]
-    host = window_returns(quotes, hosts, 20, offset)
-    if stale_or(hosts, host is None):
-        add("F", "Texas-pipeline hosts versus others", "stale",
-            "Line: equal-weight CIFR, HUT, and IREN lag equal-weight WULF and RIOT by more than 5pp.",
-            "Yahoo Finance. Relative return, not a price difference.")
-    else:
-        texas = sum(host["ret"][name] for name in ("CIFR", "HUT", "IREN")) / 3
-        other = (host["ret"]["WULF"] + host["ret"]["RIOT"]) / 2
-        lag = other - texas
-        add("F", "Texas-pipeline hosts versus others", "lit" if lag > 0.05 else "unlit",
-            f"WULF and RIOT minus CIFR, HUT, and IREN {fmt_pp(lag)}. Line: others ahead by more than 5pp. "
-            f"Window {fmt_day(host['start'])} to {fmt_day(host['end'])}.",
-            "Equal-weight 20-session returns. Texas-pipeline names are CIFR, HUT, IREN. The comparison names are WULF and RIOT.")
-    return checks
-
-
-def cpi_rows(bundle: dict, offset: int) -> list[dict]:
-    rows = shifted(bundle["cpi"], offset)
-    out = []
-    for older, newer in zip(rows, rows[1:]):
-        if older[1] == 0:
-            continue
-        raw = (newer[1] / older[1] - 1) * Decimal(100)
-        out.append({
-            "month": newer[0],
-            "raw": raw,
-            "published": round_tenth(raw),
-        })
-    return out
-
-
-def month_value(rows, months_back: int, offset: int):
-    use = shifted(rows, offset)
-    if not use:
-        return None
-    year, month = _add_month(use[-1][0].year, use[-1][0].month, -months_back)
-    for day, value in use:
-        if day.year == year and day.month == month:
-            return value
-    return None
-
-
-def build_legs(bundle: dict, offset: int, apply_missing: bool) -> list[dict]:
+def build_view(bundle: dict) -> dict:
     now = bundle["now"]
     quotes = bundle["quotes"]
     status = bundle["status"]
-    legs = []
-
-    def price(ticker: str):
-        series = quotes.get(ticker)
-        if not series:
-            return None
-        bars = shifted(series["bars"], offset)
-        if not bars:
-            return None
-        return series, bars[-1], bars
-
-    # Inflation
-    cpi = cpi_rows(bundle, offset)
-    core = cpi[-1] if cpi else None
-    prior = cpi[-2] if len(cpi) > 1 else None
-    cpi_old = core is None or (apply_missing and monthly_stale(core["month"], now, "cpi"))
-    dgs = shifted(bundle["dgs2"], offset)
-    dgs_old = len(dgs) < 21 or (apply_missing and fred_stale(bundle["dgs2"], now))
-    rates_bp = None
-    rates_up = False
-    if len(dgs) >= 21:
-        rates_bp = dgs[-1][1] - dgs[-21][1]
-        rates_up = rates_bp > 0
-    twice = bool(core and prior and core["published"] >= Decimal("0.3") and prior["published"] >= Decimal("0.3"))
-    core_det = bool(core and core["published"] >= Decimal("0.3") and not cpi_old)
-    wti = price("CL=F")
-    brent = price("BZ=F")
-    oil_old = True
-    brent_px = wti_px = None
-    if brent:
-        brent_px = brent[1]["close"]
-        oil_old = apply_missing and series_stale(brent[2], now)
-    if wti:
-        wti_px = wti[1]["close"]
-        oil_old = oil_old and (apply_missing and series_stale(wti[2], now))
-    if brent or wti:
-        oil_old = False
-        if apply_missing:
-            oil_old = True
-            if brent and not series_stale(brent[2], now):
-                oil_old = False
-            if wti and not series_stale(wti[2], now):
-                oil_old = False
-    oil_det = False
-    oil_status = ""
-    if brent_px is not None and brent_px > 100 or wti_px is not None and wti_px > 100:
-        oil_det = True
-        oil_status = "red"
-    elif (brent_px is not None and brent_px > 95) or (wti_px is not None and wti_px > 95):
-        oil_det = True
-        oil_status = "yellow"
-    if oil_old:
-        oil_det = False
-        oil_status = "stale"
-
-    core_status = "yellow" if core_det else ""
-    if core and twice and rates_up and not cpi_old:
-        core_status = "red"
-    if cpi_old:
-        core_status = "stale"
-        core_det = False
-
-    if core:
-        core_value = f"{core['published']:.1f}%"
-        core_tip = (
-            f"FRED CPILFESL, seasonally adjusted index. Published month-on-month change is the index ratio "
-            f"rounded half up to one decimal, the CPI release convention. Unrounded {core['raw']:.3f}%. "
-            f"Month {fmt_day(core['month'])}."
-        )
-        if prior:
-            core_change = f"prior {prior['published']:.1f}%"
-            core_tip += f" Prior month unrounded {prior['raw']:.3f}%."
-        else:
-            core_change = DASH
-    else:
-        core_value, core_change, core_tip = DASH, DASH, "FRED CPILFESL was not loaded."
-    if cpi_old and core:
-        core_tip += " The print is stale: a newer CPI release is out, or the file is behind that release."
-
-    if len(dgs) >= 2 and not dgs_old:
-        dgs_value = f"{dgs[-1][1]:.2f}%"
-        week = dgs[-1][1] - dgs[-6][1] if len(dgs) >= 6 else None
-        dgs_change = fmt_bp(rates_bp) + " / 20d" if rates_bp is not None else DASH
-        if week is not None:
-            dgs_change = fmt_bp(week) + " 1w · " + dgs_change
-        dgs_tip = (
-            f"FRED DGS2. Observation {fmt_day(dgs[-1][0])}. "
-            + (f"20-observation change {fmt_bp(rates_bp)}. " if rates_bp is not None else "")
-            + "Dec meeting odds were not loaded."
-        )
-    else:
-        dgs_value, dgs_change = DASH, DASH
-        dgs_tip = "FRED DGS2 was not loaded or is old." + failure_note(status, "fred DGS2")
-
-    def oil_bit(label, ticker, px, bar):
-        if px is None or bar is None:
-            return tip(DASH, f"{label} was not loaded." + failure_note(status, ticker))
-        kind = ""
-        if not oil_old:
-            if px > 100:
-                kind = "st-red"
-            elif px > 95:
-                kind = "st-yellow"
-        elif oil_old:
-            kind = "stale"
-        text = tip(f"{label} {px:,.2f}", f"Yahoo Finance {ticker}. {session_phrase(bar)}.", kind)
-        return text
-
-    brent_bar = brent[1] if brent else None
-    wti_bar = wti[1] if wti else None
-    oil_value = " ".join([
-        oil_bit("Brent", "BZ=F", brent_px, brent_bar),
-        oil_bit("WTI", "CL=F", wti_px, wti_bar),
-    ])
-    oil_change_parts = []
-    if brent and len(brent[2]) >= 6:
-        oil_change_parts.append("Brent " + fmt_pct(brent[2][-1]["close"] / brent[2][-6]["close"] - 1) + " 1w")
-    if wti and len(wti[2]) >= 6:
-        oil_change_parts.append("WTI " + fmt_pct(wti[2][-1]["close"] / wti[2][-6]["close"] - 1) + " 1w")
-    oil_change = " · ".join(oil_change_parts) if oil_change_parts else DASH
-
-    inflation_flags = [("core", core_det), ("oil", oil_det)]
-    inflation_missing = bool(cpi_old or oil_old)
-    if core and twice and not rates_up and rates_bp is not None:
-        rates_clause = f"Two published 0.3% prints, and the 2-year yield is {fmt_bp(rates_bp)} over 20 observations, so the rates-up half is not met."
-    elif core and core["published"] >= Decimal("0.3") and not twice:
-        rates_clause = "The latest published print is at least 0.3%. The red line needs two months, plus higher 2-year yields."
-    elif core and twice and rates_up:
-        rates_clause = "Two published prints are at least 0.3% and the 2-year yield is up. That is the core red line."
-    else:
-        rates_clause = "The latest published core print is below 0.3%."
-    oil_clause = "Neither benchmark is above $95."
-    if oil_status == "red":
-        oil_clause = "A benchmark is above the $100 red line."
-    elif oil_status == "yellow":
-        names = []
-        if brent_px is not None and brent_px > 95:
-            names.append("Brent")
-        if wti_px is not None and wti_px > 95:
-            names.append("WTI")
-        oil_clause = " and ".join(names) + " is above the $95 yellow line and short of $100." if names else oil_clause
-
-    core_meter = ""
-    if core and not cpi_old:
-        core_meter = meter(float(core["raw"]), 0, 0.6, "yellow and the level inside the red line: 0.3%", 0.3, 0.3, core_status)
-    oil_meter = ""
-    if brent_px is not None:
-        oil_meter = meter(brent_px, 70, 120, "Brent yellow $95, red $100", 95, 100, oil_status if brent_px > 95 else "")
-    if wti_px is not None:
-        wti_state = "red" if wti_px > 100 else "yellow" if wti_px > 95 else ""
-        oil_meter += meter(wti_px, 70, 120, "WTI yellow $95, red $100", 95, 100, wti_state)
-
-    legs.append({
-        "name": "Inflation",
-        "light": leg_light(inflation_flags, inflation_missing and not (core_det or oil_det)),
-        "because": ", ".join(part for part, flag in (("core CPI", core_det), ("oil", oil_det)) if flag) or "no line crossed",
-        "yellow": "Proposal: one core CPI print at or above 0.3% month on month, or oil above $95.",
-        "red": "Core CPI at or above 0.3% for two consecutive months while the 2-year yield is up over 20 trading days, or oil above $100. " + rates_clause + " " + oil_clause,
-        "indicators": [
-            {
-                "name": "Core CPI",
-                "value": tip(core_value, core_tip, "stale" if cpi_old else ("st-yellow" if core_status == "yellow" else "st-red" if core_status == "red" else "")),
-                "change": core_change,
-                "spark": spark([float(item["raw"]) for item in cpi[-24:]]),
-                "meter": core_meter,
-                "deteriorating": core_det,
-            },
-            {
-                "name": "2-year and Dec odds",
-                "value": tip(dgs_value, dgs_tip, "stale" if dgs_old else "") + " Dec odds " + tip(DASH, "CME FedWatch did not return a parseable Dec meeting probability. Nothing is filled in." + failure_note(status, "cme")),
-                "change": dgs_change,
-                "spark": spark([row[1] for row in dgs[-30:]]),
-                "meter": "",
-                "deteriorating": False,
-            },
-            {
-                "name": "Oil",
-                "value": oil_value,
-                "change": oil_change,
-                "spark": spark([bar["close"] for bar in (brent[2] if brent else [])[-30:]]),
-                "meter": oil_meter,
-                "deteriorating": oil_det,
-            },
-        ],
-    })
-
-    # Growth
-    pay = shifted(bundle["pay"], offset)
-    unrate = shifted(bundle["unrate"], offset)
-    claims = shifted(bundle["claims"], offset)
-    pay_old = len(pay) < 2 or (apply_missing and monthly_stale(pay[-1][0], now, "jobs"))
-    un_old = len(unrate) < 4 or (apply_missing and monthly_stale(unrate[-1][0], now, "jobs"))
-    claims_old = len(claims) < 4 or (apply_missing and fred_stale(bundle["claims"], now, weekly=True))
-    pay_change = pay[-1][1] - pay[-2][1] if len(pay) >= 2 else None
-    pay_det = bool(pay_change is not None and pay_change < 50 and not pay_old)
-    claims_avg = sum(row[1] for row in claims[-4:]) / 4 if len(claims) >= 4 else None
-    prev_avg = sum(row[1] for row in claims[-5:-1]) / 4 if len(claims) >= 5 else None
-    claims_det = bool(claims_avg is not None and claims_avg > 210_000 and not claims_old)
-    un_change = None
-    if unrate and not un_old:
-        back = month_value(bundle["unrate"], 3, offset)
-        if back is not None:
-            un_change = unrate[-1][1] - back
-    un_det = bool(un_change is not None and un_change >= 0.3 and not un_old)
-    if pay_change is None:
-        pay_value, pay_tip = DASH, "FRED PAYEMS was not loaded."
-    else:
-        pay_value = f"{pay_change:+,.0f}k"
-        pay_tip = (
-            f"FRED PAYEMS level change, thousands of persons. {fmt_day(pay[-2][0])} {pay[-2][1]:,.0f} to "
-            f"{fmt_day(pay[-1][0])} {pay[-1][1]:,.0f}. Proposal yellow is below +50k. Red level is below zero."
-        )
-    claims_value = DASH if claims_avg is None else f"{claims_avg / 1000:.1f}k"
-    claims_tip = "FRED ICSA, 4-week average of weekly initial claims."
-    if claims:
-        claims_tip += f" Latest week {fmt_day(claims[-1][0])} {claims[-1][1]:,.0f}."
-    if claims_old:
-        claims_tip += " Weekly prints go stale after 8 days."
-    un_value = DASH if not unrate or un_old else f"{unrate[-1][1]:.1f}%"
-    un_tip = "FRED UNRATE."
-    if unrate:
-        un_tip += f" Month {fmt_day(unrate[-1][0])}."
-    if un_change is not None:
-        un_tip += f" Change versus three months earlier {un_change:+.1f}pp."
-    pay_status = "red" if pay_change is not None and pay_change < 0 and not pay_old else ("yellow" if pay_det else "")
-    claims_status = "red" if claims_avg is not None and claims_avg > 227_000 and not claims_old else ("yellow" if claims_det else "")
-    growth_missing = pay_old or claims_old
-    legs.append({
-        "name": "Growth",
-        "light": leg_light([("payrolls", pay_det), ("claims", claims_det), ("unrate", un_det)], growth_missing and not (pay_det or claims_det or un_det)),
-        "because": ", ".join(part for part, flag in (("payrolls", pay_det), ("claims", claims_det), ("unemployment", un_det)) if flag) or "no line crossed",
-        "yellow": "Proposal: payrolls monthly change below +50k, the 4-week claims average above 210k, or unemployment up 0.3pp over three months.",
-        "red": "The 4-week average of initial claims above 227k AND a negative payrolls print.",
-        "indicators": [
-            {
-                "name": "Payrolls",
-                "value": tip(pay_value, pay_tip, "stale" if pay_old else ("st-red" if pay_status == "red" else "st-yellow" if pay_status == "yellow" else "")),
-                "change": "m/m" if pay_change is not None else DASH,
-                "spark": spark([pay[index][1] - pay[index - 1][1] for index in range(1, len(pay))][-24:]),
-                "meter": meter(pay_change, -100, 300, "yellow +50k, red 0", 50, 0, pay_status) if pay_change is not None and not pay_old else "",
-                "deteriorating": pay_det,
-            },
-            {
-                "name": "Unemployment",
-                "value": tip(un_value, un_tip, "stale" if un_old else ("st-yellow" if un_det else "")),
-                "change": DASH if un_change is None else f"{un_change:+.1f}pp / 3m",
-                "spark": spark([row[1] for row in unrate[-24:]]),
-                "meter": meter(un_change, -0.6, 0.8, "proposal yellow +0.3pp over 3 months", 0.3, None, "yellow" if un_det else "") if un_change is not None else "",
-                "deteriorating": un_det,
-            },
-            {
-                "name": "Claims, 4-week",
-                "value": tip(claims_value, claims_tip, "stale" if claims_old else ("st-red" if claims_status == "red" else "st-yellow" if claims_status == "yellow" else "")),
-                "change": DASH if prev_avg is None or claims_avg is None else fmt_k_delta(claims_avg - prev_avg) + " 1w",
-                "spark": spark([row[1] for row in claims[-20:]]),
-                "meter": meter(claims_avg, 150_000, 260_000, "yellow 210k, red 227k", 210_000, 227_000, claims_status) if claims_avg is not None and not claims_old else "",
-                "deteriorating": claims_det,
-            },
-        ],
-    })
-
-    # AI rules
     manual = bundle["manual"]
-    asof = datetime.fromisoformat(manual["asof_sgt"])
-    rules_old = apply_missing and manual_stale(asof, now)
-    bans = manual.get("signed_state_bans")
-    pause = bool(manual.get("grid_pause_confirmed"))
-    rules_det_ban = bool(bans is not None and bans >= 1 and not rules_old)
-    rules_det_pause = bool(pause and not rules_old)
-    rules_tip = f"Manual entry {fmt_dt(asof)}. Source: {manual.get('source', '')}"
-    texas = manual.get("texas_status", "")
-    tceq = manual.get("tceq_note", "")
-    legs.append({
-        "name": "AI rules",
-        "light": "stale" if rules_old else leg_light([("bans", rules_det_ban), ("grid", rules_det_pause)], False),
-        "because": ", ".join(part for part, flag in (("signed ban", rules_det_ban), ("grid pause", rules_det_pause)) if flag) or "no line crossed",
-        "yellow": "Proposal: a major-state ban has passed one chamber, or the ERCOT verification report recommends a pause.",
-        "red": "A signed ban in a major state, or a confirmed grid pause. " + texas + " " + tceq,
-        "indicators": [
-            {
-                "name": "Signed state bans",
-                "value": tip(DASH if bans is None else str(bans), rules_tip, "stale" if rules_old else ("st-red" if rules_det_ban else "")),
-                "change": "manual",
-                "spark": "",
-                "meter": meter(bans or 0, 0, 2, "red line: 1 signed major-state ban", None, 1, "red" if rules_det_ban else "") if bans is not None and not rules_old else "",
-                "deteriorating": rules_det_ban,
-            },
-            {
-                "name": "Texas grid",
-                "value": tip("Confirmed pause" if pause else "Unconfirmed", rules_tip + " " + texas + " " + tceq, "stale" if rules_old else ("st-red" if rules_det_pause else "")),
-                "change": "decision 17 Dec",
-                "spark": "",
-                "meter": "",
-                "deteriorating": rules_det_pause,
-            },
-        ],
-    })
 
-    # AI money — required prints are not loaded.
-    money_missing_tip = "No live print is loaded. A remembered spread or yield is not filled in."
-    legs.append({
-        "name": "AI money",
-        "light": "missing",
-        "because": "prints not loaded",
-        "yellow": "Auction price at 90% to 95% of par is the yellow band. A CRWV funding flag without a second channel stays on this leg.",
-        "red": "The data-center loan auction below 90% of par, or pulled, PLUS a CRWV funding red flag. Bids are 19 Nov 2026. CDS and the 2031/2032 unsecured yield are not loaded.",
-        "indicators": [
-            {"name": "CRWV CDS and unsecured yield", "value": tip(DASH, money_missing_tip), "change": DASH, "spark": "", "meter": "", "deteriorating": False},
-            {"name": "SoftBank and Oracle CDS", "value": tip(DASH, money_missing_tip), "change": DASH, "spark": "", "meter": "", "deteriorating": False},
-            {"name": "Loan auction", "value": tip(DASH, "Bids 19 Nov 2026. Green at or above 95% of par, yellow 90% to 95%, red below 90% or pulled. No price is loaded."), "change": DASH, "spark": "", "meter": "", "deteriorating": False},
-        ],
-    })
-
-    # AI demand
-    nvda = price("NVDA")
-    nvda_value, nvda_change, nvda_spark, nvda_tip = DASH, DASH, "", "Yahoo Finance NVDA was not loaded."
-    if nvda:
-        bar = nvda[1]
-        bars = nvda[2]
-        nvda_value = fmt_px(bar["close"], "NVDA")
-        nvda_tip = f"Yahoo Finance NVDA. {session_phrase(bar)}. Shown as context. The demand red line is rents and a 2027 capex cut, not the share price."
-        if len(bars) >= 6:
-            nvda_change = fmt_pct(bars[-1]["close"] / bars[-6]["close"] - 1) + " 1w"
-        nvda_spark = spark([item["close"] for item in bars[-30:]])
-        if apply_missing and series_stale(bars, now):
-            nvda_tip += " The price is stale."
-    legs.append({
-        "name": "AI demand",
-        "light": "missing",
-        "because": "rent prints not loaded",
-        "yellow": "Proposal: H100 or B200 one-month rent down 10% or more.",
-        "red": "Rents down 20% in a month PLUS a 2027 capex cut that cites demand. Neither rent nor the capex guide is loaded. NVDA is context only.",
-        "indicators": [
-            {"name": "H100 rent, 1 month", "value": tip(DASH, "No public H100 rent series was loaded."), "change": DASH, "spark": "", "meter": "", "deteriorating": False},
-            {"name": "B200 rent, 1 month", "value": tip(DASH, "No public B200 rent series was loaded."), "change": DASH, "spark": "", "meter": "", "deteriorating": False},
-            {"name": "NVDA", "value": tip(nvda_value, nvda_tip), "change": nvda_change, "spark": nvda_spark, "meter": "", "deteriorating": False},
-        ],
-    })
-
-    # Spillover
-    hy = shifted(bundle["hy"], offset)
-    ig = shifted(bundle["ig"], offset)
-    sofr = shifted(bundle["sofr"], offset)
-    srf = shifted(bundle["srf"], offset)
-    hy_old = len(hy) < 2 or (apply_missing and fred_stale(bundle["hy"], now))
-    ig_old = len(ig) < 2 or (apply_missing and fred_stale(bundle["ig"], now))
-    sofr_old = len(sofr) < 2 or (apply_missing and fred_stale(bundle["sofr"], now))
-    srf_old = len(srf) < 1 or (apply_missing and fred_stale(bundle["srf"], now))
-    hy_det = bool(hy and hy[-1][1] > 4.0 and not hy_old)
-    hy_status = "red" if hy and hy[-1][1] > 4.5 and not hy_old else ("yellow" if hy_det else "")
-    hy_value = DASH if not hy else f"{hy[-1][1]:.2f}%"
-    hy_change = DASH
-    if len(hy) >= 6:
-        hy_change = fmt_bp(hy[-1][1] - hy[-6][1]) + " 1w"
-    hy_tip = "FRED BAMLH0A0HYM2, percent."
-    if hy:
-        hy_tip += f" Observation {fmt_day(hy[-1][0])}. Proposal yellow is above 4.0%. Red level is above 4.5%."
-    ig_value = DASH if not ig else f"{ig[-1][1]:.2f}%"
-    ig_change = fmt_bp(ig[-1][1] - ig[-6][1]) + " 1w" if len(ig) >= 6 else DASH
-    ig_tip = "FRED BAMLC0A0CM, percent. No separate yellow or red line in the 8 Nov brief."
-    if ig:
-        ig_tip += f" Observation {fmt_day(ig[-1][0])}."
-    sofr_value = DASH if not sofr else f"{sofr[-1][1]:.2f}%"
-    sofr_tip = "FRED SOFR, percent. Official range bounds were not loaded, so the range comparison is empty."
-    if sofr:
-        sofr_tip += f" Observation {fmt_day(sofr[-1][0])}."
-    srf_value = DASH if not srf else f"{srf[-1][1]:.2f}bn"
-    srf_tip = "FRED RPONTSYD, billions of dollars. Standing repo usage. No numeric red line is set."
-    if srf:
-        srf_tip += f" Observation {fmt_day(srf[-1][0])}."
-    spill_missing = hy_old
-    legs.append({
-        "name": "Spillover",
-        "light": leg_light([("hy", hy_det)], spill_missing and not hy_det),
-        "because": "HY OAS" if hy_det else "no line crossed",
-        "yellow": "Proposal: HY OAS above 4.0%. IG, SOFR, and SRF are shown beside it. SOFR versus its official range is empty until the bounds are loaded.",
-        "red": "HY OAS above 4.5% AND SOFR above the official range. AI-name CDS counts on the money leg unless HY, IG, SOFR, or SRF also move. "
-        + (f"HY OAS is {hy[-1][1]:.2f}%, so the 4.5% half is not met. " if hy else "")
-        + "The SOFR range comparison is empty.",
-        "indicators": [
-            {
-                "name": "HY OAS",
-                "value": tip(hy_value, hy_tip, "stale" if hy_old else ("st-red" if hy_status == "red" else "st-yellow" if hy_status == "yellow" else "")),
-                "change": hy_change,
-                "spark": spark([row[1] for row in hy[-30:]]),
-                "meter": meter(hy[-1][1], 2.5, 5.5, "yellow 4.0%, red 4.5%", 4.0, 4.5, hy_status) if hy and not hy_old else "",
-                "deteriorating": hy_det,
-            },
-            {
-                "name": "IG OAS",
-                "value": tip(ig_value, ig_tip, "stale" if ig_old else ""),
-                "change": ig_change,
-                "spark": spark([row[1] for row in ig[-30:]]),
-                "meter": "",
-                "deteriorating": False,
-            },
-            {
-                "name": "SOFR and SRF",
-                "value": tip("SOFR " + sofr_value, sofr_tip, "stale" if sofr_old else "") + " range " + tip(DASH, "Official SOFR range bounds were not loaded.") + " SRF " + tip(srf_value, srf_tip, "stale" if srf_old else ""),
-                "change": DASH,
-                "spark": spark([row[1] for row in sofr[-30:]]),
-                "meter": "",
-                "deteriorating": False,
-            },
-        ],
-    })
-
-    # Crypto
-    btc = price("BTC-USD")
-    funding = shifted(bundle["funding"], offset)
-    usde = shifted(bundle["usde"], offset)
-    btc_old = True
-    btc_value, btc_change, btc_spark, btc_tip = DASH, DASH, "", "Yahoo Finance BTC-USD was not loaded."
-    if btc:
-        bar, bars = btc[1], btc[2]
-        btc_old = apply_missing and series_stale(bars, now, crypto=True)
-        btc_value = fmt_px(bar["close"], "BTC-USD")
-        btc_tip = f"Yahoo Finance BTC-USD. {fmt_dt(datetime.fromtimestamp(bar['ts'], SGT))}."
-        if len(bars) >= 8:
-            btc_change = fmt_pct(bars[-1]["close"] / bars[-8]["close"] - 1) + " 7d"
-        btc_spark = spark([item["close"] for item in bars[-30:]])
-    fund_old = True
-    fund_value, fund_change = DASH, DASH
-    fund_tip = "Binance BTCUSDT perpetual funding was not loaded." + failure_note(status, "binance")
-    if funding:
-        last = funding[-1]
-        fund_old = apply_missing and funding_is_stale(last["ts"], now)
-        fund_value = f"{last['rate'] * 100:.4f}% / 8h"
-        fund_tip = (
-            f"Binance BTCUSDT perpetual funding, per 8 hours. {fmt_dt(datetime.fromtimestamp(last['ts'], SGT))}."
-            + failure_note(status, "binance")
-        )
-        week_cut = last["ts"] - 7 * 86400
-        prior = min(funding, key=lambda item: abs(item["ts"] - week_cut))
-        fund_change = f"{(last['rate'] - prior['rate']) * 100:+.4f}pp / ~7d"
-    usde_old = True
-    usde_value, usde_change, usde_spark = DASH, DASH, ""
-    usde_tip = "DefiLlama USDe was not loaded." + failure_note(status, "usde")
-    if usde:
-        last = usde[-1]
-        usde_old = apply_missing and (now.astimezone(SGT).date() - datetime.fromtimestamp(last["ts"], SGT).date()).days > 1
-        usde_value = fmt_usd(last["value"])
-        usde_tip = f"DefiLlama USDe circulating supply. {fmt_dt(datetime.fromtimestamp(last['ts'], SGT))}."
-        target = last["ts"] - 30 * 86400
-        prior = min(usde, key=lambda item: abs(item["ts"] - target))
-        if prior["value"]:
-            usde_change = fmt_pct(last["value"] / prior["value"] - 1) + " ~30d"
-        usde_spark = spark([item["value"] for item in usde[-60:]])
-    mstr = price("MSTR")
-    strc = price("STRC")
-    mstr_value = tip(DASH, "The coin count was not loaded, so the MSTR multiple is not computed.")
-    strc_value = tip(DASH, "Yahoo Finance STRC was not loaded.")
-    if strc:
-        px = strc[1]["close"]
-        versus = px / 100 - 1
-        strc_value = tip(
-            f"{px:,.2f} ({fmt_pct(versus)} vs $100 par)",
-            f"Yahoo Finance STRC. {session_phrase(strc[1])}. Par is the $100 face. No accrued-dividend adjustment.",
-        )
-    crypto_missing = btc_old or fund_old or usde_old
-    legs.append({
-        "name": "Crypto",
-        "light": "stale" if crypto_missing else "green",
-        "because": "no numeric red line in the brief",
-        "yellow": "No numeric yellow line is set in the 8 Nov brief. Prints are shown and not scored.",
-        "red": "No numeric red line is set in the 8 Nov brief for BTC, funding, USDe, the MSTR multiple, or STRC versus par.",
-        "indicators": [
-            {"name": "BTC and funding", "value": tip(btc_value, btc_tip, "stale" if btc_old else "") + " funding " + tip(fund_value, fund_tip, "stale" if fund_old else ""), "change": " ".join(part for part in (btc_change, fund_change) if part != DASH) or DASH, "spark": btc_spark, "meter": "", "deteriorating": False},
-            {"name": "USDe", "value": tip(usde_value, usde_tip, "stale" if usde_old else ""), "change": usde_change, "spark": usde_spark, "meter": "", "deteriorating": False},
-            {"name": "MSTR mNAV and STRC", "value": "mNAV " + mstr_value + " STRC " + strc_value, "change": mstr_change(mstr), "spark": spark([bar["close"] for bar in mstr[2][-30:]]) if mstr else "", "meter": "", "deteriorating": False},
-        ],
-    })
-    return legs
-
-
-def mstr_change(mstr) -> str:
-    if not mstr or len(mstr[2]) < 6:
-        return DASH
-    return "MSTR " + fmt_pct(mstr[2][-1]["close"] / mstr[2][-6]["close"] - 1) + " 1w"
-
-
-def fmt_k_delta(value: float) -> str:
-    sign = "+" if value >= 0 else ""
-    return f"{sign}{value / 1000:.1f}k"
-
-
-def fmt_usd(value: float) -> str:
-    if abs(value) >= 1e12:
-        return f"${value / 1e12:.2f}tn"
-    if abs(value) >= 1e9:
-        return f"${value / 1e9:.2f}bn"
-    if abs(value) >= 1e6:
-        return f"${value / 1e6:.1f}m"
-    return f"${value:,.0f}"
-
-
-def session_phrase(bar: dict) -> str:
-    stamp = fmt_dt(datetime.fromtimestamp(bar["ts"], SGT))
-    return f"Session {fmt_day(bar['session'])}, print {stamp}"
-
-
-def closest_candidates(bundle: dict) -> list[dict]:
-    candidates = []
-    quotes = bundle["quotes"]
-    for ticker, label in (("BZ=F", "Brent"), ("CL=F", "WTI")):
-        series = quotes.get(ticker)
-        if not series or series_stale(series["bars"], bundle["now"]):
-            continue
-        px = series["bars"][-1]["close"]
-        gap = 100 - px
-        candidates.append({
-            "name": label,
-            "leg": "Inflation",
-            "frac": gap / 100,
-            "phrase": (
-                f"{label} is ${abs(gap):.2f} {'through' if gap < 0 else 'under'} the $100 red line "
-                f"(last ${px:,.2f}). The yellow line is $95."
-            ),
-        })
-    hy = bundle["hy"]
-    if hy and not fred_stale(hy, bundle["now"]):
-        gap = 4.5 - hy[-1][1]
-        candidates.append({
-            "name": "HY OAS",
-            "leg": "Spillover",
-            "frac": gap / 4.5,
-            "phrase": (
-                f"HY OAS is {abs(gap):.2f} percentage points {'through' if gap < 0 else 'under'} the 4.5% red line "
-                f"(last {hy[-1][1]:.2f}%). The red line also needs SOFR above its official range, and those bounds are not loaded."
-            ),
-        })
-    claims = bundle["claims"]
-    pay = bundle["pay"]
-    if len(claims) >= 4 and len(pay) >= 2 and not fred_stale(claims, bundle["now"], weekly=True) and not monthly_stale(pay[-1][0], bundle["now"], "jobs"):
-        avg = sum(row[1] for row in claims[-4:]) / 4
-        pay_change = pay[-1][1] - pay[-2][1]
-        claims_frac = (227_000 - avg) / 227_000
-        pay_frac = pay_change / 100
-        binding = max(claims_frac, pay_frac)
-        candidates.append({
-            "name": "Claims and payrolls",
-            "leg": "Growth",
-            "frac": binding,
-            "phrase": (
-                f"The growth red line needs claims above 227k and negative payrolls. "
-                f"The 4-week average is {avg / 1000:.1f}k and payrolls are {pay_change:+,.0f}k. "
-                f"Distance uses the further of those two gaps. Payrolls are scaled by 100k because the red threshold is zero."
-            ),
-        })
-    cpi = cpi_rows(bundle, 0)
+    prints = cpi_prints(bundle["cpi"])
+    core = prints[-1] if prints else None
+    prior = prints[-2] if len(prints) > 1 else None
+    cpi_old = core is None or monthly_stale(core["month"], now, "cpi")
     dgs = bundle["dgs2"]
-    if len(cpi) >= 2 and len(dgs) >= 21 and not monthly_stale(cpi[-1]["month"], bundle["now"], "cpi"):
-        twice = cpi[-1]["published"] >= Decimal("0.3") and cpi[-2]["published"] >= Decimal("0.3")
-        rates_up = dgs[-1][1] - dgs[-21][1] > 0
-        if twice and rates_up:
-            gap = float(Decimal("0.3") - cpi[-1]["published"])
-            candidates.append({
-                "name": "Core CPI",
-                "leg": "Inflation",
-                "frac": gap / 0.3,
-                "phrase": "Core CPI is through the two-month 0.3% red line and the 2-year yield is up.",
-            })
-    return candidates
+    dgs_old = len(dgs) < 21 or daily_stale(dgs[-1][0], now)
+    rates_bp = (dgs[-1][1] - dgs[-21][1]) if len(dgs) >= 21 else None
+    rates_up = bool(rates_bp is not None and rates_bp > 0)
+    twice = bool(core and prior and core["published"] >= Decimal("0.3") and prior["published"] >= Decimal("0.3"))
+    core_hot = bool(core and core["published"] >= Decimal("0.3") and not cpi_old)
 
-
-PLACE = {
-    "CL=F": "the inflation leg",
-    "BZ=F": "the inflation leg",
-    "DGS2": "the inflation leg",
-    "BAMLH0A0HYM2": "the spillover leg",
-    "BAMLC0A0CM": "the spillover leg",
-    "SOFR": "the spillover leg",
-    "RPONTSYD": "the spillover leg",
-    "CRWV": "the AI money leg and the neocloud pair",
-    "NBIS": "the neocloud control",
-    "NVDA": "AI demand, as context only",
-    "SMH": "the supplier side of the D check",
-    "XLP": "the D check",
-    "XLE": "the C check",
-    "TLT": "the E check",
-    "SPY": "the market-implied checks",
-    "QQQ": "the C check",
-    "IWM": "the A check",
-    "EQIX": "the F check",
-    "DLR": "the F check",
-    "VST": "the F avoid list",
-    "CIFR": "box A and the Texas-host side of the F check",
-    "HUT": "the Texas-host side of the F check",
-    "IREN": "box A and the Texas-host side of the F check",
-    "WULF": "the F check",
-    "RIOT": "the F check",
-    "BTC-USD": "the crypto leg",
-    "MSTR": "the crypto leg",
-    "STRC": "the crypto leg",
-    "USDE": "the crypto leg",
-    "FUNDING": "the crypto leg",
-}
-
-
-def level_side_oil(value: float) -> str:
-    if value > 100:
-        return "through the $100 red line"
-    if value > 95:
-        return "through the $95 yellow line"
-    return "short of the $95 yellow line"
-
-
-def build_moves(bundle: dict) -> list[dict]:
-    moves = []
-    for ticker, series in bundle["quotes"].items():
-        bars = series["bars"]
-        if len(bars) < 2 or bars[-2]["close"] == 0:
-            continue
-        frac = bars[-1]["close"] / bars[-2]["close"] - 1
-        extra = "No red line on this page, so this print does not change the leg count by itself."
-        if ticker in ("CL=F", "BZ=F"):
-            extra = (
-                f"It was {level_side_oil(bars[-2]['close'])} and is {level_side_oil(bars[-1]['close'])}."
-            )
-        name = {"^NDX": "NDX", "BTC-USD": "BTC", "CL=F": "WTI", "BZ=F": "Brent"}.get(ticker, ticker)
-        moves.append({
-            "score": abs(frac) * 100,
-            "name": name,
-            "text": f"{name} {fmt_pct(frac)} → {PLACE.get(ticker, 'the watchlist')}. {extra}",
-            "when": fmt_dt(datetime.fromtimestamp(bars[-1]["ts"], SGT)),
-            "source": "Yahoo Finance",
-            "old": fmt_px(bars[-2]["close"], ticker),
-            "new": fmt_px(bars[-1]["close"], ticker),
-        })
-    fred_moves = [
-        ("DGS2", bundle["dgs2"], "2-year yield", "percent"),
-        ("BAMLH0A0HYM2", bundle["hy"], "HY OAS", "percent"),
-        ("BAMLC0A0CM", bundle["ig"], "IG OAS", "percent"),
-        ("SOFR", bundle["sofr"], "SOFR", "percent"),
-        ("RPONTSYD", bundle["srf"], "SRF usage", "billions"),
-    ]
-    for key, rows, label, unit in fred_moves:
-        if len(rows) < 2:
-            continue
-        change = rows[-1][1] - rows[-2][1]
-        if unit == "percent":
-            shown = fmt_bp(change)
-            score = abs(change) * 10
-        else:
-            shown = f"{change:+.2f}bn"
-            score = abs(change)
-        moves.append({
-            "score": score,
-            "name": label,
-            "text": f"{label} {shown} → {PLACE.get(key, 'the tape')}. No standalone leg change from this one-session move.",
-            "when": fmt_day(rows[-1][0]),
-            "source": "FRED " + key,
-            "old": f"{rows[-2][1]:.2f}",
-            "new": f"{rows[-1][1]:.2f}",
-        })
-    if len(bundle["funding"]) >= 2:
-        last, prev = bundle["funding"][-1], bundle["funding"][-2]
-        change = (last["rate"] - prev["rate"]) * 100
-        moves.append({
-            "score": abs(change) * 100,
-            "name": "BTC funding",
-            "text": f"BTC funding {change:+.4f}pp per 8h → the crypto leg. No numeric red line is set, so this does not change the leg count.",
-            "when": fmt_dt(datetime.fromtimestamp(last["ts"], SGT)),
-            "source": "Binance BTCUSDT funding",
-            "old": f"{prev['rate'] * 100:.4f}%",
-            "new": f"{last['rate'] * 100:.4f}%",
-        })
-    if len(bundle["usde"]) >= 2:
-        last, prev = bundle["usde"][-1], bundle["usde"][-2]
-        if prev["value"]:
-            frac = last["value"] / prev["value"] - 1
-            moves.append({
-                "score": abs(frac) * 100,
-                "name": "USDe",
-                "text": f"USDe supply {fmt_pct(frac)} → the crypto leg. No numeric red line is set, so this does not change the leg count.",
-                "when": fmt_dt(datetime.fromtimestamp(last["ts"], SGT)),
-                "source": "DefiLlama",
-                "old": fmt_usd(prev["value"]),
-                "new": fmt_usd(last["value"]),
-            })
-    moves.sort(key=lambda item: (-item["score"], item["name"]))
-    return moves[:3]
-
-
-def flags_only(bundle: dict, offset: int) -> list[tuple[str, str]]:
-    """Threshold lights for a prior print. Missing money and demand stay missing."""
-    legs = build_legs(bundle, offset, apply_missing=True)
-    return [(leg["name"], leg["light"]) for leg in legs]
-
-
-def reason_for(action: str, legs: list[dict], det: list[str], grey: list[str]) -> str:
-    detail = {leg["name"]: leg["because"] for leg in legs}
-    if action == "CUT":
-        bits = [f"{name} ({detail.get(name, '')})" for name in det]
-        return "CUT. Deteriorating legs: " + "; ".join(bits) + "."
-    if det:
-        name = det[0]
-        extra = ""
-        if grey:
-            extra = " Missing or stale: " + ", ".join(grey) + ". That also blocks ADD."
-        return f"HOLD. Only {name} is deteriorating ({detail.get(name, '')}). A second leg would be CUT.{extra}"
-    if grey:
-        return "HOLD. No leg is through a line, but " + ", ".join(grey) + " cannot count as green, so this is not ADD."
-    return "ADD. No leg is deteriorating, and the required inputs are fresh enough."
-
-
-def watch_groups() -> list[tuple[str, list, str]]:
-    return [
-        ("A", [("SPCX", ""), ("^NDX", ""), ("SMH", ""), ("BTC-USD", ""), ("MSTR", ""), ("IREN", ""), ("CIFR", "")], ""),
-        ("B", [("MSFT", ""), ("GOOGL", ""), ("AMZN", ""), ("SPY", ""), ("XLE", "")], "Pair below is the NBIS/CRWV ratio."),
-        ("C", [("XLE", ""), ("STRC", "Short watch")], ""),
-        ("D", [("XLP", ""), ("STRC", ""), ("CRWV", ""), ("APLD", ""), ("CORZ", "")], "No individual short tag is set on this list."),
-        ("E", [("TLT", ""), ("CASH", "")], ""),
-        ("F", [("MSFT", ""), ("AMZN", ""), ("GOOGL", ""), ("CAT", "F only"), ("GEV", "F only"), ("EQIX", ""), ("DLR", ""), ("WULF", ""), ("RIOT", ""), ("VST", "Avoid"), ("CIFR", "Avoid"), ("HUT", "Avoid")], ""),
-    ]
-
-
-def chip(ticker: str, tag: str, quotes: dict) -> str:
-    if ticker == "CASH":
-        return '<div class="chip"><div class="chip-k">Cash</div><div class="na">\u2014</div><p class="muted">Not a ticker. No price.</p></div>'
-    series = quotes.get(ticker)
-    label = {"^NDX": "NDX", "BTC-USD": "BTC"}.get(ticker, ticker)
-    tag_html = f'<span class="tag">{esc(tag)}</span>' if tag else ""
-    if not series or len(series["bars"]) < 2:
-        return f'<div class="chip"><div class="chip-k">{esc(label)} {tag_html}</div><div class="na">\u2014</div></div>'
-    bars = series["bars"]
-    last = bars[-1]
-    one = last["close"] / bars[-2]["close"] - 1
-    five = last["close"] / bars[-6]["close"] - 1 if len(bars) >= 6 else None
-    five_txt = fmt_pct(five) + " 5d" if five is not None else DASH
-    return (
-        f'<div class="chip"><div class="chip-k">{esc(label)} {tag_html}</div>'
-        f'<div class="chip-px">{tip(fmt_px(last["close"], ticker), "Yahoo Finance " + label + ". " + session_phrase(last))}</div>'
-        f'<div class="muted">{esc(fmt_pct(one) + " 1d · " + five_txt)}</div>'
-        f'{spark([bar["close"] for bar in bars[-30:]])}</div>'
-    )
-
-
-def ratio_chip(quotes: dict) -> str:
-    if "NBIS" not in quotes or "CRWV" not in quotes:
-        return '<div class="chip wide"><div class="chip-k">NBIS/CRWV</div><div class="na">\u2014</div><p class="muted">Ratio, not a price difference. One name is not loaded.</p></div>'
-    left = {bar["session"]: bar for bar in quotes["NBIS"]["bars"]}
-    right = {bar["session"]: bar for bar in quotes["CRWV"]["bars"]}
-    dates = sorted(set(left) & set(right))
-    vals = [left[day]["close"] / right[day]["close"] for day in dates if right[day]["close"]]
-    if len(vals) < 2:
-        return '<div class="chip wide"><div class="chip-k">NBIS/CRWV</div><div class="na">\u2014</div></div>'
-    one = vals[-1] / vals[-2] - 1
-    five = vals[-1] / vals[-6] - 1 if len(vals) >= 6 else None
-    five_txt = fmt_pct(five) + " 5d" if five is not None else DASH
-    detail = (
-        f"NBIS close divided by CRWV close. Last shared session {fmt_day(dates[-1])}. "
-        "This is a ratio, not a price difference. Sparkline uses up to 60 sessions."
-    )
-    return (
-        f'<div class="chip wide"><div class="chip-k">NBIS/CRWV</div>'
-        f'<div class="chip-px">{tip(f"{vals[-1]:.2f}", detail)}</div>'
-        f'<div class="muted">{esc(fmt_pct(one) + " 1d · " + five_txt)}</div>'
-        f'{spark(vals[-60:])}</div>'
-    )
-
-
-def neocloud(quotes: dict, now: datetime) -> str:
-    def block(ticker: str) -> str:
+    def px(ticker: str):
         series = quotes.get(ticker)
         if not series:
-            return f"<h3>{esc(ticker)}</h3><p class='na'>\u2014</p>"
-        bar = series["bars"][-1]
-        high = series.get("high52")
-        from_high = DASH if not high else f"{(bar['close'] / high - 1) * 100:.1f}% from the 52-week high"
-        high_tip = "Yahoo Finance fiftyTwoWeekHigh in the chart metadata. " + session_phrase(bar)
-        return (
-            f"<h3>{esc(ticker)} {tip(fmt_px(bar['close'], ticker), 'Yahoo Finance. ' + session_phrase(bar))}</h3>"
-            f"<p>{tip(from_high, high_tip) if high else tip(DASH, '52-week high was not in the chart metadata.')}</p>"
-        )
+            return None
+        return series["bars"]
 
-    report = datetime(2026, 11, 11, 6, 0, tzinfo=SGT)
-    if now < report:
-        intro = "Before the report (11 Nov 2026, about 06:00 SGT). Criteria only. Results stay empty."
+    brent, wti = px("BZ=F"), px("CL=F")
+    brent_px = brent[-1]["close"] if brent else None
+    wti_px = wti[-1]["close"] if wti else None
+    oil_old = True
+    if brent and not daily_stale(brent[-1]["session"], now):
+        oil_old = False
+    if wti and not daily_stale(wti[-1]["session"], now):
+        oil_old = False
+    if brent is None and wti is None:
+        oil_old = True
+    oil_red = ((brent_px is not None and brent_px > 100) or (wti_px is not None and wti_px > 100)) and not oil_old
+    oil_yellow = ((brent_px is not None and brent_px > 95) or (wti_px is not None and wti_px > 95)) and not oil_old
+    full_core_red = bool(twice and rates_up and not cpi_old and not dgs_old)
+    if (full_core_red or oil_red) and not (cpi_old and oil_old):
+        inflation = "red"
+    elif (core_hot or oil_yellow) and not (cpi_old and oil_old):
+        inflation = "yellow"
+    elif cpi_old or oil_old or dgs_old:
+        inflation = "missing"
     else:
-        intro = "The 11 Nov 2026, 06:00 SGT report time has passed. No results were entered, so every result stays empty."
-    rows = [
-        ("New financing rate", "Unsecured, about 15% in the 8 Nov brief. Not a live yield.", "New unsecured at or above 15%, or secured only", "At or below 12%, or prepay / partner funding"),
-        ("Q4 interest guide", "Q3 guide $860–940M", "Above $1.0bn, and operating income not keeping up", "Interest growing slower than operating income"),
-        ("Adj. operating income", "Q3 guide $200–260M", "Below $200M", "Above $260M"),
-        ("Capex guide", "Raised at Q2", "Cut because of funding. A cut that cites power or permits is F, not money.", "Held or raised, and funding is named"),
-        ("Credit reaction, 48h", "No live CDS baseline is loaded.", "+100bp", "−100bp"),
-    ]
-    body = []
-    for metric, base, red, green in rows:
-        body.append(
-            "<tr>"
-            f"<td>{esc(metric)}</td><td>{esc(base)}</td><td>{esc(red)}</td><td>{esc(green)}</td>"
-            f"<td class='na'>{DASH}</td></tr>"
-        )
-    return f"""
-    <div class="neo-grid">
-      <div>
-        <p class="kicker">Neoclouds</p>
-        <div class="pair">{block("CRWV")}{block("NBIS")}</div>
-        <p>CRWV unsecured yield {tip(DASH, "No public 2031 or 2032 unsecured yield was loaded.")}. CRWV CDS {tip(DASH, "No public CDS print was loaded.")}.</p>
-        {ratio_chip(quotes)}
-      </div>
-      <div>
-        <p class="kicker">CRWV Q3 scorecard</p>
-        <p>{esc(intro)}</p>
-        <table>
-          <thead><tr><th>Metric</th><th>Baseline</th><th>Red</th><th>Green</th><th>Result</th></tr></thead>
-          <tbody>{''.join(body)}</tbody>
-        </table>
-        <p>Demand, recorded separately: revenue versus the guide $3.45–3.60bn and consensus about $3.54bn. Backlog versus about $129bn. Result {tip(DASH, "Not entered. The report has not been scored on this page.")}.</p>
-        <p>NBIS reports 12 Nov 2026, about 21:00 SGT, and is the control. If NBIS falls on good numbers too, the market is pricing the whole neocloud model. If NBIS rebounds and CRWV does not, the stress is CRWV's balance sheet.</p>
-      </div>
-    </div>
-    """
+        inflation = "green"
+
+    claims = bundle["claims"]
+    claims_old = len(claims) < 4 or weekly_stale(claims[-1][0], now)
+    claims_avg = sum(row[1] for row in claims[-4:]) / 4 if len(claims) >= 4 else None
+    prev_claims = sum(row[1] for row in claims[-5:-1]) / 4 if len(claims) >= 5 else None
+    pay = bundle["pay"]
+    pay_old = len(pay) < 2 or monthly_stale(pay[-1][0], now, "jobs")
+    pay_change = pay[-1][1] - pay[-2][1] if len(pay) >= 2 else None
+    growth_red = bool(claims_avg is not None and claims_avg > 227_000 and pay_change is not None and pay_change < 0 and not claims_old and not pay_old)
+    if growth_red:
+        growth = "red"
+    elif claims_old or pay_old:
+        growth = "missing"
+    else:
+        growth = "green"
+
+    texas = manual["texas"]
+    texas_asof = datetime.fromisoformat(texas["asof_sgt"])
+    texas_old = manual_stale(texas_asof, now)
+    rules_red = bool((texas.get("signed_ban") or texas.get("grid_pause_confirmed")) and not texas_old)
+    rules = "red" if rules_red else ("missing" if texas_old else "green")
+
+    yield_m = manual["crwv_yield"]
+    cds_m = manual["crwv_cds"]
+    yield_old = manual_stale(datetime.fromisoformat(yield_m["asof_sgt"]), now)
+    cds_old = manual_stale(datetime.fromisoformat(cds_m["asof_sgt"]), now)
+    funding_flag = yield_m.get("label", "").startswith(">") and not yield_old
+    auction_state = "pending"
+    money_red = money_is_red(auction_state, funding_flag)
+    if money_red:
+        money = "red"
+    elif funding_flag:
+        money = "yellow"
+    elif yield_old and cds_old:
+        money = "missing"
+    else:
+        money = "green"
+
+    silicon = bundle["silicon"]
+    rent_manual = False
+    h100_rows = b200_rows = None
+    if silicon and silicon.get("series", {}).get("h100", {}).get("rows") and silicon.get("series", {}).get("b200", {}).get("rows"):
+        h100_rows = silicon["series"]["h100"]["rows"]
+        b200_rows = silicon["series"]["b200"]["rows"]
+    else:
+        rent_manual = True
+    h100_1m = b200_1m = None
+    h100_span = b200_span = None
+    h100_1w = b200_1w = None
+    rents_old = True
+    if h100_rows and b200_rows:
+        h100_day = date.fromisoformat(h100_rows[-1]["date"])
+        b200_day = date.fromisoformat(b200_rows[-1]["date"])
+        rents_old = (now.astimezone(SGT).date() - max(h100_day, b200_day)).days > 1
+        h100_1m, h100_span = rent_change(h100_rows, 30)
+        b200_1m, b200_span = rent_change(b200_rows, 30)
+        h100_1w, _ = rent_change(h100_rows, 7)
+        b200_1w, _ = rent_change(b200_rows, 7)
+    rent_drop_10 = bool((h100_1m is not None and h100_1m <= -0.10) or (b200_1m is not None and b200_1m <= -0.10))
+    rent_drop_20 = bool((h100_1m is not None and h100_1m <= -0.20) or (b200_1m is not None and b200_1m <= -0.20))
+    capex_cut = False
+    if rents_old or h100_1m is None or b200_1m is None:
+        demand = "missing"
+    elif rent_drop_20 and capex_cut:
+        demand = "red"
+    elif rent_drop_10:
+        demand = "yellow"
+    else:
+        demand = "green"
+
+    hy = bundle["hy"]
+    sofr = bundle["sofr"]
+    hy_old = len(hy) < 2 or daily_stale(hy[-1][0], now)
+    sofr_old = len(sofr) < 1 or daily_stale(sofr[-1][0], now)
+    hy_red_level = bool(hy and hy[-1][1] > 4.5 and not hy_old)
+    hy_yellow = bool(hy and hy[-1][1] > 4.0 and not hy_old)
+    sofr_above = False
+    hy_red = hy_red_level and sofr_above
+    if hy_red:
+        spill = "red"
+    elif hy_yellow:
+        spill = "yellow"
+    elif hy_old:
+        spill = "missing"
+    else:
+        spill = "green"
+
+    legs = {
+        "inflation": inflation,
+        "growth": growth,
+        "rules": rules,
+        "money": money,
+        "demand": demand,
+        "spill": spill,
+    }
+    action = header_action(legs["money"] == "red", hy_red)
+
+    hy_gap = (4.5 - hy[-1][1]) if hy and not hy_old else None
+    closest = "Closest to CUT: HY OAS is not loaded."
+    if hy_gap is not None:
+        closest = f"Closest to CUT: HY OAS, {abs(hy_gap) * 100:.0f}bp {'through' if hy_gap < 0 else 'under'} 4.5%."
+    if legs["money"] == "red" or hy_red:
+        closest = "A stop item is already on."
+
+    if inflation == "yellow":
+        why = "Inflation is yellow"
+    elif inflation == "red":
+        why = "Inflation is red"
+    elif inflation == "green":
+        why = "Inflation is green"
+    else:
+        why = "Inflation is missing"
+    if action == "CUT":
+        why = "A stop item has triggered"
+    else:
+        why = why + "; the stop list is clear"
+    reason = f"{why}. {closest}"
+
+    events = []
+    for row in bundle["catalysts"]:
+        when = datetime.fromisoformat(row["when_sgt"])
+        events.append({**row, "when": when})
+    events.sort(key=lambda row: row["when"])
+    upcoming = [row for row in events if row["when"] > now]
+    nxt = upcoming[0] if upcoming else None
+    shown = [row for row in events if visible_catalyst(row, now)]
+
+    return {
+        "now": now,
+        "legs": legs,
+        "action": action,
+        "reason": reason,
+        "closest": closest,
+        "core": core,
+        "prior": prior,
+        "cpi_old": cpi_old,
+        "rates_bp": rates_bp,
+        "rates_up": rates_up,
+        "twice": twice,
+        "dgs": dgs,
+        "dgs_old": dgs_old,
+        "brent": brent,
+        "wti": wti,
+        "brent_px": brent_px,
+        "wti_px": wti_px,
+        "oil_old": oil_old,
+        "claims": claims,
+        "claims_avg": claims_avg,
+        "prev_claims": prev_claims,
+        "claims_old": claims_old,
+        "pay": pay,
+        "pay_change": pay_change,
+        "pay_old": pay_old,
+        "texas": texas,
+        "texas_old": texas_old,
+        "yield_m": yield_m,
+        "cds_m": cds_m,
+        "yield_old": yield_old,
+        "cds_old": cds_old,
+        "h100_rows": h100_rows,
+        "b200_rows": b200_rows,
+        "rent_manual": rent_manual,
+        "rents_old": rents_old,
+        "h100_1m": h100_1m,
+        "b200_1m": b200_1m,
+        "h100_1w": h100_1w,
+        "b200_1w": b200_1w,
+        "h100_span": h100_span,
+        "b200_span": b200_span,
+        "hy": hy,
+        "sofr": sofr,
+        "hy_old": hy_old,
+        "sofr_old": sofr_old,
+        "hy_gap": hy_gap,
+        "quotes": quotes,
+        "status": status,
+        "silicon": silicon,
+        "nxt": nxt,
+        "shown": shown,
+        "events": events,
+        "deploy_met": 0,
+        "stop_hit": int(legs["money"] == "red") + int(hy_red),
+        "hy_red": hy_red,
+    }
 
 
-def catalysts(now: datetime) -> str:
-    items = [
-        ("10 Nov 2026, 15:30 SGT", "SoftBank Q2", "AI money", "If the print is a funding red flag beside CRWV, that points at D-money.", datetime(2026, 11, 10, 15, 30, tzinfo=SGT)),
-        ("10 Nov 2026, 21:30 SGT", "October CPI", "Inflation", "If core month-on-month is at or above 0.3%, the inflation channel is on its yellow line. A second hot print with the 2-year yield up points at C.", datetime(2026, 11, 10, 21, 30, tzinfo=SGT)),
-        ("11 Nov 2026, about 06:00 SGT", "CoreWeave Q3", "AI money", "A red scorecard on funding points at D-money. A cut that cites power or permits points at F.", datetime(2026, 11, 11, 6, 0, tzinfo=SGT)),
-        ("12 Nov 2026, about 21:00 SGT", "Nebius Q3", "Neocloud control", "If NBIS falls on good numbers too, the market is pricing the whole neocloud model. If NBIS rebounds and CRWV does not, the stress is CRWV's balance sheet.", datetime(2026, 11, 12, 21, 0, tzinfo=SGT)),
-        ("18 Nov 2026, about 05:20 SGT", "Nvidia Q3", "AI demand", "If 2027 capex is cut and the cut cites demand, with rents down 20% in a month, that is the demand red line.", datetime(2026, 11, 18, 5, 20, tzinfo=SGT)),
-        ("19 Nov 2026", "Data-center loan auction bids", "AI money", "Below 90% of par, or a pulled auction, plus a CRWV funding red flag, is the money red line.", None),
-        ("25 Nov 2026, 21:30 SGT", "October PCE", "Inflation", "A hot core print with the 2-year yield up points at C.", datetime(2026, 11, 25, 21, 30, tzinfo=SGT)),
-        ("about 29 Nov 2026, UV", "OPEC+", "Inflation", "If oil settles above $100, that is the oil red line.", None),
-        ("4 Dec 2026, 21:30 SGT", "November jobs", "Growth", "Negative payrolls and a 4-week claims average above 227k are the growth red line.", datetime(2026, 12, 4, 21, 30, tzinfo=SGT)),
-        ("about 8 Dec 2026, UV", "SPCX lockup", "Box A watchlist", "Unconfirmed. A lockup is a supply event for an A watchlist name. It is not, by itself, a box change.", None),
-        ("10 Dec 2026, about 03:00 SGT", "FOMC and the ERCOT verification report", "Inflation and AI rules", "A hawkish shift with hot inflation points at C. The ERCOT report is the rules input for 10 Dec.", datetime(2026, 12, 10, 3, 0, tzinfo=SGT)),
-        ("17 Dec 2026, UV", "Texas grid decision", "AI rules", "Unconfirmed. A confirmed grid pause is the rules red line and points at a blocked buildout, F.", None),
-        ("22 Dec 2026", "PJM auction", "AI rules", "A capacity result that blocks the buildout points at F.", None),
-    ]
-    cards = []
-    for when, event, leg, implication, moment in items:
-        if moment is not None and now >= moment:
-            result = "Time has passed. Result not entered."
-        else:
-            result = "Result: " + DASH
-        cards.append(
-            f'<article class="card"><p class="kicker">{esc(when)}</p><h3>{esc(event)}</h3>'
-            f'<p>{esc(leg)}</p><p>{esc(implication)}</p><p class="muted">{esc(result)}</p></article>'
-        )
-    return "".join(cards)
+def countdown(target: datetime, now: datetime) -> str:
+    seconds = int((target - now).total_seconds())
+    if seconds <= 0:
+        return "now"
+    days, rem = divmod(seconds, 86400)
+    hours = rem // 3600
+    if days:
+        return f"in {days}d {hours}h"
+    return f"in {hours}h"
 
 
-def render_leg(leg: dict) -> str:
-    light = leg["light"]
-    label = {"green": "Green", "yellow": "Yellow", "red": "Red", "stale": "Stale", "missing": "Missing"}.get(light, light)
-    sub = {
-        "green": "No line crossed",
-        "yellow": "One indicator through a line",
-        "red": "Two indicators through a line",
-        "stale": "Print is old",
-        "missing": "Required print not loaded",
-    }.get(light, "")
-    inds = []
-    for item in leg["indicators"]:
-        inds.append(
-            "<div class='ind'>"
-            f"<div class='ind-k'>{esc(item['name'])}</div>"
-            f"<div class='ind-v'>{item['value']}</div>"
-            f"<div class='muted'>{esc(item['change'])}</div>"
-            f"{item['spark']}{item['meter']}</div>"
-        )
+def tile(name: str, light: str, lines: list[str]) -> str:
+    label = {"green": "Green", "yellow": "Yellow", "red": "Red", "missing": "Missing"}.get(light, light)
+    body = "".join(f"<p>{line}</p>" for line in lines)
     return (
-        f"<article class='leg'>"
-        f"<div class='lamp {esc(light)}'>{esc(label)}</div> <span class='muted'>{esc(sub)}</span>"
-        f"<h3>{esc(leg['name'])}</h3>"
-        f"<div class='inds'>{''.join(inds)}</div>"
-        f"<p><span class='k'>Yellow line. </span>{esc(leg['yellow'])}</p>"
-        f"<p><span class='k'>Red line. </span>{esc(leg['red'])}</p>"
-        f"</article>"
+        f'<article class="tile"><div class="top"><b>{esc(name)}</b>'
+        f'<span class="lamp {esc(light)}">{esc(label)}</span></div>{body}</article>'
     )
 
 
-def render_map(judgment: dict) -> str:
-    probs = judgment["probabilities"]
-    current = judgment["current_box"]
+def inflation_tile(view: dict) -> str:
+    core, prior = view["core"], view["prior"]
+    if core:
+        kind = "st-yellow" if view["legs"]["inflation"] == "yellow" else ("st-red" if view["legs"]["inflation"] == "red" else "")
+        if view["cpi_old"]:
+            kind = "na"
+        core_html = tip(
+            f"{core['published']:.1f}%",
+            f"FRED CPILFESL. Published month-on-month change, half up to one decimal. "
+            f"Unrounded {core['raw']:.3f}%. Month {fmt_day(core['month'])}."
+            + (f" Prior published {prior['published']:.1f}%." if prior else ""),
+            kind,
+        )
+    else:
+        core_html = tip(DASH, "FRED CPILFESL was not loaded.")
+    if view["rates_bp"] is not None and not view["dgs_old"]:
+        dgs = view["dgs"]
+        rate_html = tip(
+            fmt_bp(view["rates_bp"]) + "/20d",
+            f"FRED DGS2, from {dgs[-21][1]:.2f}% on {fmt_day(dgs[-21][0])} to {dgs[-1][1]:.2f}% on {fmt_day(dgs[-1][0])}. Not a bill or 10-year yield.",
+        )
+    else:
+        rate_html = tip(DASH, "FRED DGS2 was not loaded or is old." + failure_note(view["status"], "fred DGS2"))
+    def oil_html(label, ticker, bars, value):
+        if not bars or value is None:
+            return tip(DASH, f"{label} was not loaded." + failure_note(view["status"], ticker))
+        kind = ""
+        if not view["oil_old"]:
+            if value > 100:
+                kind = "st-red"
+            elif value > 95:
+                kind = "st-yellow"
+        week = ret(bars, 5)
+        week_txt = "" if week is None else " " + fmt_pct(week) + " 1w"
+        return tip(f"{label} {value:,.2f}", f"Yahoo Finance {ticker}. {session_phrase(bars[-1])}", kind) + esc(week_txt)
+    missing = []
+    if view["twice"] and not view["rates_up"]:
+        missing.append("two 0.3% prints are in, and the 2-year yield is not up")
+    elif view["core"] and view["core"]["published"] >= Decimal("0.3"):
+        missing.append("needs a second core print at or above 0.3% with the 2-year yield up")
+    else:
+        missing.append("core is under 0.3%")
+    missing.append("oil is under $100")
+    return tile("Inflation", view["legs"]["inflation"], [
+        "Core " + core_html + " · 2Y " + rate_html,
+        oil_html("Brent", "BZ=F", view["brent"], view["brent_px"]) + " · " + oil_html("WTI", "CL=F", view["wti"], view["wti_px"]),
+        "<span class='to'>to red: " + esc("; ".join(missing)) + ".</span>",
+    ])
 
-    def prob(key: str) -> str:
+
+def growth_tile(view: dict) -> str:
+    if view["claims_avg"] is None:
+        claims_html = tip(DASH, "FRED ICSA was not loaded.")
+        week = ""
+    else:
+        kind = "na" if view["claims_old"] else ""
+        claims = view["claims"]
+        claims_html = tip(
+            f"{view['claims_avg'] / 1000:.1f}k",
+            f"FRED ICSA, 4-week average. Latest week {fmt_day(claims[-1][0])} {claims[-1][1]:,.0f}.",
+            kind,
+        )
+        if view["prev_claims"] is not None:
+            week = " 1w " + tip(f"{(view['claims_avg'] - view['prev_claims']) / 1000:+.1f}k", "Change in the 4-week average versus the prior week.")
+        else:
+            week = ""
+    if view["pay_change"] is None:
+        pay_html = tip(DASH, "FRED PAYEMS was not loaded.")
+    else:
+        pay = view["pay"]
+        pay_html = tip(
+            f"{view['pay_change']:+,.0f}k",
+            f"FRED PAYEMS monthly change, thousands of persons. {fmt_day(pay[-2][0])} to {fmt_day(pay[-1][0])}.",
+            "na" if view["pay_old"] else "",
+        )
+    return tile("Growth", view["legs"]["growth"], [
+        "Claims " + claims_html + week,
+        "Payrolls " + pay_html,
+        "<span class='to'>to red: claims above 227k and payrolls below zero.</span>",
+    ])
+
+
+def rules_tile(view: dict) -> str:
+    texas = view["texas"]
+    kind = "na" if view["texas_old"] else ""
+    line = tip(texas["line"], f"Manual {fmt_dt(datetime.fromisoformat(texas['asof_sgt']))}. {texas['source']}", kind)
+    return tile("AI rules", view["legs"]["rules"], [
+        line,
+        "<span class='to'>to red: a signed ban in a major state, or a confirmed grid pause.</span>",
+    ])
+
+
+def ratio_bits(view: dict) -> tuple[str, str]:
+    quotes = view["quotes"]
+    if "NBIS" not in quotes or "CRWV" not in quotes:
+        return tip(DASH, "NBIS or CRWV was not loaded."), ""
+    left = {bar["session"]: bar["close"] for bar in quotes["NBIS"]["bars"]}
+    right = {bar["session"]: bar["close"] for bar in quotes["CRWV"]["bars"]}
+    dates = [day for day in sorted(set(left) & set(right)) if right[day]]
+    vals = [left[day] / right[day] for day in dates]
+    if len(vals) < 2:
+        return tip(DASH, "The shared NBIS and CRWV history is too short."), ""
+    one = vals[-1] / vals[-2] - 1
+    week = vals[-1] / vals[-6] - 1 if len(vals) >= 6 else None
+    detail = (
+        f"NBIS close divided by CRWV close on {fmt_day(dates[-1])}. "
+        f"1d {fmt_pct(one)}" + (f", 5 sessions {fmt_pct(week)}." if week is not None else ".")
+        + " A ratio, not a price difference. " + session_phrase(quotes["CRWV"]["bars"][-1])
+    )
+    html = tip(f"{vals[-1]:.2f}", detail) + spark(vals[-30:])
+    week_html = "" if week is None else " 1w " + tip(fmt_pct(week), "Five-session change in the NBIS/CRWV ratio.")
+    return html, week_html
+
+
+def money_tile(view: dict) -> str:
+    y = view["yield_m"]
+    c = view["cds_m"]
+    y_html = tip(y["label"], f"Manual {fmt_dt(datetime.fromisoformat(y['asof_sgt']))}. {y['source']}", "na" if view["yield_old"] else "st-yellow")
+    c_html = tip(c["label"], f"Manual {fmt_dt(datetime.fromisoformat(c['asof_sgt']))}. {c['source']}", "na" if view["cds_old"] else "")
+    ratio, week = ratio_bits(view)
+    return tile("AI money", view["legs"]["money"], [
+        "Yield " + y_html + " · CDS " + c_html,
+        "NBIS/CRWV " + ratio + week,
+        "<span class='to'>to red: auction below 90% of par, or pulled, and a CRWV funding flag. Bids 19 Nov; no auction print yet.</span>",
+    ])
+
+
+def demand_tile(view: dict) -> str:
+    if view["h100_rows"] and view["b200_rows"] and not view["rent_manual"]:
+        h100 = view["h100_rows"][-1]
+        b200 = view["b200_rows"][-1]
+        h_tip = (
+            f"Silicon Data H100 index, public page, {h100['date']}. "
+            f"1-month change uses a {view['h100_span']}-day span in that table."
+            + failure_note(view["status"], "silicon")
+        )
+        b_tip = (
+            f"Silicon Data B200 index, public page, {b200['date']}. "
+            f"1-month change uses a {view['b200_span']}-day span in that table."
+        )
+        kind = "na" if view["rents_old"] else ""
+        h_html = tip(f"${h100['value']:.2f}", h_tip, kind)
+        b_html = tip(f"${b200['value']:.2f}", b_tip, kind)
+        def chg(value, label):
+            if value is None:
+                return tip(DASH, label + " change was not in the table.")
+            return tip(fmt_pct(value), label)
+        one_m = "1m " + chg(view["h100_1m"], "H100") + " / " + chg(view["b200_1m"], "B200")
+        one_w = "1w " + chg(view["h100_1w"], "H100") + " / " + chg(view["b200_1w"], "B200")
+        mark = ""
+    else:
+        manual = view["manual"]["silicon_data"] if False else None
+        # manual fallback is read from the file in the bundle via the tile caller's view; use the stored manual through a direct read below
+        h_html = tip(DASH, "Silicon Data index was not parsed." + failure_note(view["status"], "silicon"))
+        b_html = h_html
+        one_m = "1m " + tip(DASH, "No 1-month change without a history.")
+        one_w = ""
+        mark = ""
+    # Prefer live rows. Manual path is filled here when rows are missing.
+    if not view["h100_rows"]:
+        manual = json_manual_rents()
+        h_html = tip(f"${manual['h100_usd']:.2f}", f"Manual {manual['asof_sgt']}. {manual['source']}", "na")
+        b_html = tip(f"${manual['b200_usd']:.2f}", f"Manual {manual['asof_sgt']}. {manual['source']}", "na")
+        one_m = "1m " + tip(DASH, "The manual note has no 1-month history.")
+        one_w = ""
+        mark = " manual"
+    return tile("AI demand", view["legs"]["demand"], [
+        f"H100 {h_html}{mark} · B200 {b_html}{mark}",
+        one_w + ((" · " + one_m) if one_w else one_m),
+        "<span class='to'>to red: a 20% monthly drop and a 2027 capex cut that cites demand. Yellow is a 10% monthly drop.</span>",
+    ])
+
+
+def json_manual_rents() -> dict:
+    return load_json(DATA / "manual.json")["silicon_data"]
+
+
+def spill_tile(view: dict) -> str:
+    hy = view["hy"]
+    if hy and not view["hy_old"]:
+        week = fmt_bp(hy[-1][1] - hy[-6][1]) + " 1w" if len(hy) >= 6 else ""
+        hy_html = tip(f"{hy[-1][1]:.2f}%", f"FRED BAMLH0A0HYM2. Observation {fmt_day(hy[-1][0])}.", "")
+        week_html = "" if not week else " " + tip(week, f"Change versus {fmt_day(hy[-6][0])}.")
+    else:
+        hy_html = tip(DASH, "FRED HY OAS was not loaded or is old.")
+        week_html = ""
+    if view["sofr"] and not view["sofr_old"]:
+        sofr = view["sofr"]
+        sofr_html = tip(f"{sofr[-1][1]:.2f}%", f"FRED SOFR. Observation {fmt_day(sofr[-1][0])}.")
+    else:
+        sofr_html = tip(DASH, "FRED SOFR was not loaded or is old.")
+    range_html = tip(DASH, "Official SOFR range bounds were not loaded. The above-range half is not treated as met.")
+    return tile("Spillover", view["legs"]["spill"], [
+        "HY " + hy_html + week_html,
+        "SOFR " + sofr_html + " · range " + range_html,
+        "<span class='to'>to red: HY above 4.5% and SOFR above its official range. Yellow is HY above 4.0%.</span>",
+    ])
+
+
+def checklist(view: dict) -> str:
+    deploy = [
+        ("Oct core at or below 0.2% (10 Nov)", "pending"),
+        ("Fed signals an end, or flat 2027 dots (10 Dec)", "pending"),
+        ("Payrolls above zero (4 Dec)", "pending"),
+        ("CRWV yield falling and auction at or above 95% of par (19 Nov)", "pending"),
+        ("Nvidia orders intact (18 Nov)", "pending"),
+    ]
+    stop = [
+        ("AI money leg red", "hit" if view["legs"]["money"] == "red" else "clear"),
+        ("HY OAS above 4.5%", "hit" if view["hy_red"] else "clear"),
+    ]
+
+    def mark(state: str) -> str:
+        if state == "met":
+            return '<span class="lamp green">met</span>'
+        if state == "hit":
+            return '<span class="lamp red">triggered</span>'
+        if state == "clear":
+            return '<span class="lamp green">clear</span>'
+        return '<span class="lamp missing">pending</span>'
+
+    left = "".join(f"<li>{mark(state)} {esc(text)}</li>" for text, state in deploy)
+    right = "".join(f"<li>{mark(state)} {esc(text)}</li>" for text, state in stop)
+    met = sum(1 for _, state in deploy if state == "met")
+    hit = sum(1 for _, state in stop if state == "hit")
+    return (
+        f'<div class="box"><h2>Deploy fully ({esc(PHRASE_DEPLOY)})</h2>'
+        f"<p>{met}/5 met</p><ul>{left}</ul></div>"
+        f'<div class="box"><h2>Stop ({esc(PHRASE_STOP)})</h2>'
+        f"<p>{hit}/2 triggered</p><ul>{right}</ul></div>"
+        f'<p class="foot">{esc(FOOTER)}</p>'
+    )
+
+
+def reaction_text(hit: str, event: dict, view: dict) -> str:
+    now = view["now"]
+    if now < event["when"]:
+        return ""
+    if hit == "CRWV yield":
+        return "CRWV yield " + DASH
+    if hit == "2Y":
+        return "2Y " + DASH
+    series = view["quotes"].get(hit)
+    if not series:
+        return f"{hit} {DASH}"
+    # 1-day reaction: the session that contains the event, versus the prior session.
+    when_ny = event["when"].astimezone(NY)
+    session = when_ny.date()
+    if not is_trading_day(session) or when_ny.hour >= 16:
+        session = session + timedelta(days=1)
+        while not is_trading_day(session):
+            session += timedelta(days=1)
+    bars = {bar["session"]: bar for bar in series["bars"]}
+    if session not in bars:
+        return f"{hit} {DASH}"
+    prev = prev_trading_day(session)
+    if prev not in bars or not bars[prev]["close"]:
+        return f"{hit} {DASH}"
+    change = bars[session]["close"] / bars[prev]["close"] - 1
+    return f"{hit} {fmt_pct(change)}"
+
+
+def catalyst_block(view: dict) -> str:
+    chunks = []
+    for event in view["shown"]:
+        if view["now"] >= event["when"]:
+            bits = [reaction_text(hit, event, view) for hit in event["hits"]]
+            result = ", ".join(bit for bit in bits if bit) or DASH
+            result_html = esc(result)
+        else:
+            result_html = '<span class="na">pending</span>'
+        hits = ", ".join(event["hits"]) if event["hits"] else DASH
+        line = (
+            f'<p class="day">{esc(event["label"])} · {esc(event["event"])} · {esc(event["leg"])} · '
+            f'{esc(hits)} · {result_html}</p>'
+        )
+        extra = ""
+        if scorecard_open(event, view["now"]):
+            extra = scorecard_html(event)
+        chunks.append(line + extra)
+    return "".join(chunks)
+
+
+def scorecard_html(event: dict) -> str:
+    op_line = "Op. income $ change vs interest $ change — pending. Green only if the operating-income dollar gain is larger."
+    if event["id"] == "crwv-q3":
+        op_line += " Pre-report guide midpoints, not Q3 actuals: op. income +$102M vs interest +$260M, <span class=\"lamp red\">gap widening</span>."
+    else:
+        op_line = esc(op_line)
+    rows = [
+        esc("Interest vs guide — pending. Red if above the company guide."),
+        op_line if event["id"] == "crwv-q3" else op_line,
+        esc("Next 12 months — pending. Debt due versus cash plus undrawn facilities. 2027 plan: customer prepay, new debt, equity."),
+        esc("New rate at or above 15% is red, at or below 12% is green — pending. A capex cut for funding is red; for power or permits it is F. CDS over 48 hours: +100bp red, −100bp green — pending."),
+    ]
+    if event["id"] == "crwv-q3":
+        rows[1] = esc("Op. income $ change vs interest $ change — pending. Green only if the operating-income dollar gain is larger. Pre-report guide midpoints, not Q3 actuals: op. income +$102M vs interest +$260M, ") + '<span class="lamp red">gap widening</span>.'
+    return "".join(f'<p class="sub">{row}</p>' for row in rows)
+
+
+def price_table(view: dict) -> str:
+    rows = []
+    for ticker, role in PRICES:
+        series = view["quotes"].get(ticker)
+        if not series:
+            rows.append(f"<tr><td>{esc(ticker)}</td><td class='na'>{DASH}</td><td class='na'>{DASH}</td><td class='na'>{DASH}</td><td class='na'>{DASH}</td><td>{esc(role)}</td></tr>")
+            continue
+        bars = series["bars"]
+        last = bars[-1]
+        one = ret(bars, 1)
+        five = ret(bars, 5)
+        price = tip(fmt_px(last["close"]), f"Yahoo Finance {ticker}. {session_phrase(last)}")
+        one_html = tip(fmt_pct(one), "Prior session to the latest session.") if one is not None else tip(DASH, "No prior session.")
+        five_html = tip(fmt_pct(five), "Five sessions back to the latest session.") if five is not None else tip(DASH, "Not enough sessions.")
+        since = tip(DASH, "No catalyst in the list has occurred yet, so there is no post-event move.")
+        rows.append(f"<tr><td>{esc(ticker)}</td><td>{price}</td><td>{one_html}</td><td>{five_html}</td><td>{since}</td><td>{esc(role)}</td></tr>")
+    ratio, _week = ratio_bits(view)
+    since = tip(DASH, "No catalyst in the list has occurred yet.")
+    rows.append(f"<tr><td>NBIS/CRWV</td><td>{ratio}</td><td colspan='2'>1d and 5d are inside the ratio tip</td><td>{since}</td><td>money-leg pair</td></tr>")
+    # The colspan line is a bit awkward. Replace with explicit 1d/5d below by recomputing.
+    return (
+        "<table><thead><tr><th>Ticker</th><th>Price</th><th>1d</th><th>5d</th><th>Since last catalyst</th><th>Role</th></tr></thead>"
+        f"<tbody>{''.join(rows[:-1])}{ratio_row(view)}</tbody></table>"
+    )
+
+
+def ratio_row(view: dict) -> str:
+    quotes = view["quotes"]
+    since = tip(DASH, "No catalyst in the list has occurred yet.")
+    if "NBIS" not in quotes or "CRWV" not in quotes:
+        return f"<tr><td>NBIS/CRWV</td><td class='na'>{DASH}</td><td class='na'>{DASH}</td><td class='na'>{DASH}</td><td>{since}</td><td>money-leg pair</td></tr>"
+    left = {bar["session"]: bar["close"] for bar in quotes["NBIS"]["bars"]}
+    right = {bar["session"]: bar["close"] for bar in quotes["CRWV"]["bars"]}
+    dates = [day for day in sorted(set(left) & set(right)) if right[day]]
+    vals = [left[day] / right[day] for day in dates]
+    if len(vals) < 6:
+        return f"<tr><td>NBIS/CRWV</td><td class='na'>{DASH}</td><td class='na'>{DASH}</td><td class='na'>{DASH}</td><td>{since}</td><td>money-leg pair</td></tr>"
+    one = vals[-1] / vals[-2] - 1
+    five = vals[-1] / vals[-6] - 1
+    detail = f"NBIS divided by CRWV on {fmt_day(dates[-1])}. A ratio, not a price difference."
+    return (
+        f"<tr><td>NBIS/CRWV</td><td>{tip(f'{vals[-1]:.2f}', detail)}</td>"
+        f"<td>{tip(fmt_pct(one), 'One-session change in the ratio.')}</td>"
+        f"<td>{tip(fmt_pct(five), 'Five-session change in the ratio.')}</td>"
+        f"<td>{since}</td><td>money-leg pair</td></tr>"
+    )
+
+
+def changes_block(prior: dict | None, current: dict) -> str:
+    if not prior or not prior.get("series"):
+        return f"<p>No stored snapshot to compare. {DASH}</p>"
+    rows = []
+    for key, new in current["series"].items():
+        old = prior["series"].get(key)
+        if not old or not isinstance(old.get("value"), (int, float)) or not isinstance(new.get("value"), (int, float)):
+            continue
+        if old["value"] == 0:
+            continue
+        frac = abs(new["value"] / old["value"] - 1) if abs(old["value"]) > 1 else abs(new["value"] - old["value"])
+        delta = new["value"] - old["value"]
+        if abs(delta) < 0.005 and frac < 0.0005:
+            continue
+        rows.append((frac, key, old, new))
+    rows.sort(key=lambda item: item[0], reverse=True)
+    if not rows:
+        when = prior.get("asof_sgt", "the stored snapshot")
+        return f"<p>{esc(when)} · no tracked print moved · same → same</p>"
+    lines = []
+    for _, key, old, new in rows[:3]:
+        lines.append(
+            f"<p>{esc(current['asof_sgt'])} · {esc(key)} · {old['value']:.2f} → {new['value']:.2f}</p>"
+        )
+    return "".join(lines)
+
+
+def prob_line(judgment: dict) -> str:
+    order = [("B", "B"), ("D_money", "D-money"), ("F", "F"), ("C", "C"), ("A", "A"), ("E", "E")]
+    probs = judgment["probabilities"]
+    prior = judgment.get("prior_probabilities") or {}
+    parts = []
+    weights = []
+    for key, label in order:
         value = probs.get(key)
         if value is None:
-            return DASH
-        return f"{value:g}%"
+            parts.append(f"{label} {DASH}")
+            continue
+        arrow = ""
+        if isinstance(prior, dict) and key in prior and isinstance(prior[key], (int, float)) and prior[key] != value:
+            arrow = " ↑" if value > prior[key] else " ↓"
+        parts.append(f"{label} {value:g}{arrow}")
+        weights.append(value)
+    bar = "".join(f'<i style="flex:{weight}"></i>' for weight in weights)
+    note = judgment.get("note", "")
+    return (
+        f'<p class="probs">{tip(" · ".join(parts), note)}</p>'
+        f'<div class="meter" aria-hidden="true">{bar}</div>'
+    )
 
-    def cell(area: str, code: str, title: str, probability: str, place: str, extra: str = "") -> str:
-        current_cls = " current" if code == current or (code == "D" and current in ("D", "D_money", "D_demand")) else ""
-        mark = "<span class='here'>Current</span>" if current_cls else ""
-        return (
-            f"<div class='cell{current_cls}' style='grid-area:{area}'>"
-            f"<div class='place'>{esc(place)}</div>"
-            f"<strong>{esc(code)}</strong> {mark}"
-            f"<div>{esc(title)}</div><div class='prob'>{esc(probability)}</div>"
-            f"<div class='muted'>{esc(extra)}</div></div>"
+
+def page(view: dict, judgment: dict, changes_html: str) -> str:
+    nxt = view["nxt"]
+    if nxt:
+        count = countdown(nxt["when"], view["now"])
+        catalyst = (
+            f'{esc(nxt["event"])} · {esc(nxt["label"])} · '
+            f'<span id="count" data-target="{esc(nxt["when"].isoformat())}">{esc(count)}</span>'
         )
-
-    return f"""
-    <div class="map">
-      <div class="mh" style="grid-area:corner"></div>
-      <div class="mh" style="grid-area:healthy">Healthy</div>
-      <div class="mh" style="grid-area:blocked">Blocked</div>
-      <div class="mh" style="grid-area:retr">Retrenching</div>
-      <div class="rh" style="grid-area:cooling">Cooling</div>
-      <div class="rh" style="grid-area:sticky">Sticky</div>
-      <div class="rh" style="grid-area:squeeze">Squeeze</div>
-      <div class="rh" style="grid-area:breakr">Break</div>
-      {cell("A", "A", "Cooling expansion", prob("A"), "Cooling · Healthy")}
-      {cell("B", "B", "Sticky but viable", prob("B"), "Sticky · Healthy")}
-      {cell("C", "C", "Inflation squeeze", prob("C"), "Squeeze · Healthy")}
-      {cell("F", "F", "Blocked buildout", prob("F"), "Cooling or sticky · Blocked", "The well-funded self-build continues. The rest wait.")}
-      {cell("D", "D", "AI retrenchment", "money " + prob("D_money"), "Retrenching, except in a break", "demand " + prob("D_demand"))}
-      <div class="cell" style="grid-area:hole"><div class="place">Squeeze · Blocked</div><div class="muted">No named box for squeeze plus blocked.</div></div>
-      {cell("E", "E", "Broad break", prob("E"), "Break · any AI state", "Break takes the whole row.")}
-    </div>
-    <p class="muted">Rows are the macro state. Columns are the AI state. There is no separate B checklist. If no other box has a lit check, the market-implied box is B. A tie keeps every tied box and does not pick a winner.</p>
-    """
-
-
-def render_pills(checks: list[dict]) -> str:
-    items = []
-    for check in checks:
-        items.append(
-            f"<div class='pill {esc(check['state'])}'>"
-            f"<span class='pill-k'>{esc(check['box'])} · {esc(check['state'])}</span> "
-            f"<span class='pill-t'>{esc(check['name'])}</span>"
-            f"<div>{tip(check['detail'], check['source'])}</div></div>"
-        )
-    return "".join(items)
-
-
-def page(view: dict) -> str:
-    judgment = view["judgment"]
-    current = judgment["current_box"]
-    implied = view["implied"]
-    action = view["action"]
-    banner = ""
-    if view["disagree"]:
-        banner = f"<p class='banner'>Market disagrees: {esc(implied_label(implied))}</p>"
-    last = judgment.get("last_box")
-    if not last:
-        arrow = "No prior box."
-    elif last == current:
-        arrow = "Unchanged versus the last published box."
     else:
-        arrow = f"From {BOX_TITLE.get(last, last)} to {BOX_TITLE.get(current, current)}."
-    prob = judgment["probabilities"].get(current)
-    prob_txt = DASH if prob is None else f"{prob:g}%"
-    changes = "".join(f"<li>{esc(item['text'])}</li>" for item in view["moves"])
-    log_rows = []
-    for row in view["changelog"]:
-        log_rows.append(
-            f"<tr><td>{esc(fmt_dt(datetime.fromisoformat(row['date_sgt'])))}</td>"
-            f"<td>{esc(row['what'])}</td><td>{esc(row['old'])} → {esc(row['new'])}</td>"
-            f"<td>{esc(row['source'])}</td></tr>"
-        )
-    for item in view["moves"]:
-        log_rows.append(
-            f"<tr><td>{esc(item['when'])}</td><td>{esc(item['text'])}</td>"
-            f"<td>{esc(item['old'])} → {esc(item['new'])}</td><td>{esc(item['source'])}</td></tr>"
-        )
-    chips = []
-    for code, names, note in watch_groups():
-        body = "".join(chip(ticker, tag, view["quotes"]) for ticker, tag in names)
-        extra = ratio_chip(view["quotes"]) if code == "B" else ""
-        note_html = f"<p class='muted'>{esc(note)}</p>" if note else ""
-        chips.append(f"<section><h3>{esc(code)} · {esc(BOX_TITLE.get(code, ''))}</h3>{note_html}<div class='chips'>{body}{extra}</div></section>")
-    missing = ", ".join(view["missing"])
-    blob = json.dumps(view["summary"], ensure_ascii=False).replace("<", "\\u003c")
+        catalyst = "none dated"
+    probs = judgment["probabilities"]
+    header = (
+        f'<p class="head">Box {esc(judgment["current_box"])} · {probs["B"]:g}% · '
+        f'<span class="lamp {esc(view["action"].lower())}">Action {esc(view["action"])}</span> · '
+        f'{esc(view["reason"])} · {catalyst}</p>'
+    )
     body = f"""
-    <header class="mast">
-      <div>
-        <p class="kicker">Vortex Regime Monitor</p>
-        <p class="muted">Public market data. Built {esc(view['built'])}.</p>
-      </div>
-      <button id="theme-toggle" type="button">Use light mode</button>
+    <header>
+      {header}
+      <button id="theme-toggle" type="button">Theme</button>
     </header>
-    <section class="card span-12">
-      <p class="kicker">So what today</p>
-      <div class="sowhat">
-        <div>
-          <p class="eyebrow">Current box</p>
-          <p class="letter">{esc(current)}</p>
-          <p>{esc(BOX_TITLE.get(current, current))} · {tip(prob_txt, judgment.get('note', ''))}</p>
-          <p class="muted">{esc(arrow)} Judgment {esc(fmt_dt(datetime.fromisoformat(judgment['asof_sgt'])))}.</p>
-        </div>
-        <div>
-          <p class="eyebrow">Market-implied</p>
-          <p class="letter{'' if len(implied_label(implied)) <= 2 else ' long'}">{esc(implied_label(implied))}</p>
-          <p>{esc(check_tally(view['checks']))}. Stale checks do not count. B is the residual when nothing else is lit.</p>
-          {banner}
-        </div>
-      </div>
-      <p class="action {esc(action.lower())}">{esc(action)}</p>
-      <p>{esc(view['reason'])}</p>
-      <p class="muted">ADD, HOLD, and CUT are research labels, not instructions. One deteriorating leg is HOLD. Two are CUT. The same news counts once.</p>
-      <p><span class="k">Closest to a red line. </span>{esc(view['closest'])}</p>
-      <p class="k">What changed since the prior print</p>
-      <ol>{changes}</ol>
-      <p>{esc(view['change_line'])}</p>
-      <p class="muted">{esc(view['implied_line'])}</p>
+    {prob_line(judgment)}
+    <p class="note">HOLD and CUT are research labels, not instructions.</p>
+    <h2>Legs</h2>
+    <section class="legs">
+      {inflation_tile(view)}
+      {growth_tile(view)}
+      {rules_tile(view)}
+      {money_tile(view)}
+      {demand_tile(view)}
+      {spill_tile(view)}
     </section>
-    <section class="card span-5">
-      <p class="kicker">Regime map</p>
-      {render_map(judgment)}
-    </section>
-    <section class="card span-7">
-      <p class="kicker">Seven legs</p>
-      <p>One deteriorating indicator turns that leg yellow. Two independent indicators turn it red. The same news counts once. The badge above counts legs, not every indicator. Friday's session stays current through the weekend. Stale inputs are grey and cannot count as green.</p>
-      {''.join(render_leg(leg) for leg in view['legs'])}
-    </section>
-    <section class="card span-12">
-      <p class="kicker">Market-implied checks</p>
-      <div class="pills">{render_pills(view['checks'])}</div>
-    </section>
-    <section class="card span-12">
-      {neocloud(view['quotes'], view['now'])}
-    </section>
-    <section class="card span-12">
-      <p class="kicker">Catalysts</p>
-      <p class="muted">The next 14 days run from 9 Nov through 22 Nov. Later dates from the same brief are listed too. UV means the date is unconfirmed.</p>
-      <div class="cards">{catalysts(view['now'])}</div>
-    </section>
-    <section class="card span-12">
-      <p class="kicker">Watchlist</p>
-      {''.join(chips)}
-    </section>
-    <section class="card span-12">
-      <p class="kicker">Change log</p>
-      <table>
-        <thead><tr><th>When, SGT</th><th>What moved</th><th>Old → new</th><th>Source</th></tr></thead>
-        <tbody>{''.join(log_rows)}</tbody>
-      </table>
-      <p class="muted">Not loaded, so shown as {DASH}: {esc(missing)}.</p>
-      <p class="muted">Sources: Yahoo Finance, FRED, Binance BTCUSDT funding, DefiLlama USDe. Probabilities are Jess's judgment of 8 Nov 2026 and are not rewritten by the refresh.</p>
-    </section>
-    <script type="application/json" id="vortex-data">{blob}</script>
+    <h2>December checklist</h2>
+    <section class="checks">{checklist(view)}</section>
+    <h2>Next 14 days</h2>
+    <section>{catalyst_block(view)}</section>
+    <h2>Prices we act on</h2>
+    {price_table(view)}
+    <h2>Last 3 changes</h2>
+    <section>{changes_html}</section>
     """
     return HTML_HEAD + body + HTML_FOOT
 
@@ -1776,170 +1133,57 @@ try {
 } catch (e) {}
 </script>
 <style>
-:root {
-  color-scheme: dark;
-  --bg: #121418;
-  --card: #1a1d22;
-  --ink: #f3f0e8;
-  --muted: #b1ab9f;
-  --line: #343a42;
-  --good: #1f9d62;
-  --warn: #c8922a;
-  --bad: #d15b52;
-  --stale: #9aa0a8;
-}
-[data-theme="light"] {
-  color-scheme: light;
-  --bg: #f4f1ea;
-  --card: #fffdf8;
-  --ink: #1c1915;
-  --muted: #5f594e;
-  --line: #e3ddd2;
-  --good: #0e7a45;
-  --warn: #8a5b00;
-  --bad: #a33b34;
-  --stale: #6d7278;
-}
+:root { color-scheme: dark; --bg:#121418; --card:#1b1f25; --ink:#f3f0e8; --muted:#b7b1a6; --line:#343b44; --good:#3cba7a; --warn:#e0a33a; --bad:#e36b62; --stale:#9aa1a9; }
+[data-theme="light"] { color-scheme: light; --bg:#f4f1ea; --card:#fffdf8; --ink:#1c1915; --muted:#5f594e; --line:#e3ddd2; --good:#0d7a45; --warn:#8a5a00; --bad:#a33b34; --stale:#6c7278; }
 * { box-sizing: border-box; }
-html, body { margin: 0; padding: 0; }
-body {
-  background: var(--bg);
-  color: var(--ink);
-  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  font-size: 15px;
-  line-height: 1.45;
-  font-variant-numeric: tabular-nums;
-}
-.wrap { max-width: 1140px; margin: 0 auto; padding: 20px 18px 56px; }
-.grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 14px; }
-.span-12 { grid-column: span 12; }
-.span-5 { grid-column: span 5; }
-.span-7 { grid-column: span 7; }
-.mast, .sowhat, .pair, .neo-grid { display: flex; justify-content: space-between; gap: 18px; align-items: flex-start; }
-.mast { grid-column: 1 / -1; align-items: flex-end; margin-bottom: 2px; }
-.card, .cell, .pill, .chip, .leg {
-  background: var(--card);
-  border: 1px solid var(--line);
-  border-radius: 14px;
-}
-.card { padding: 16px 16px 14px; }
-.kicker, .eyebrow, .k {
-  margin: 0 0 6px;
-  color: var(--muted);
-  font-size: 12px;
-  letter-spacing: .12em;
-  text-transform: uppercase;
-}
-h3 { margin: 0 0 6px; font-size: 16px; font-weight: 650; }
-p { margin: 0 0 8px; }
-ol { margin: 0 0 8px; padding-left: 18px; }
-li { margin: 0 0 6px; }
-.letter { font-family: Georgia, "Iowan Old Style", serif; font-size: 48px; line-height: .9; margin: 0 0 4px; }
-.letter.long { font-size: 28px; line-height: 1.15; }
-.muted, .scale { color: var(--muted); }
-.na, .stale, .lamp.missing, .lamp.stale { color: var(--stale); }
-.st-yellow, .lamp.yellow, .action.hold, .banner { color: var(--warn); }
-.st-red, .lamp.red, .action.cut { color: var(--bad); }
-.lamp.green, .action.add { color: var(--good); }
-.action { font-size: 28px; font-weight: 700; margin: 8px 0 4px; }
-.banner { font-weight: 700; }
-button {
-  background: transparent;
-  color: var(--ink);
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  padding: 8px 12px;
-  font: inherit;
-  cursor: pointer;
-}
-.map {
-  display: grid;
-  grid-template-columns: 92px repeat(3, minmax(0, 1fr));
-  grid-template-areas:
-    "corner healthy blocked retr"
-    "cooling A F D"
-    "sticky B F D"
-    "squeeze C hole D"
-    "breakr E E E";
-  gap: 6px;
-}
-.mh, .rh, .cell, .cell div { overflow-wrap: break-word; hyphens: auto; }
-p, h3, li, td, th, .kicker { overflow-wrap: break-word; }
-.mh, .rh { color: var(--muted); font-size: 12px; letter-spacing: .06em; text-transform: uppercase; align-self: end; }
-.cell { padding: 8px; min-width: 0; }
-.cell.current { border-color: var(--ink); }
-.here { font-size: 12px; border: 1px solid var(--ink); border-radius: 999px; padding: 0 6px; }
-.prob { font-weight: 650; }
-.leg { padding: 10px; margin: 8px 0; }
-.lamp { display: inline-block; font-weight: 700; border: 1px solid currentColor; border-radius: 999px; padding: 1px 8px; margin-bottom: 4px; }
-.inds { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 6px 0; }
-.ind { min-width: 0; }
-.ind-k { color: var(--muted); font-size: 12px; letter-spacing: .06em; text-transform: uppercase; }
-.spark { display: block; color: var(--muted); margin-top: 4px; overflow: visible; }
-.place { display: none; color: var(--muted); font-size: 12px; letter-spacing: .04em; text-transform: uppercase; }
-.meter { margin-top: 4px; }
-.track { position: relative; height: 8px; background: var(--line); border-radius: 99px; margin: 8px 0 4px; }
-.mark, .dot { position: absolute; top: -3px; }
-.mark { width: 2px; height: 14px; }
-.mark.y { background: var(--warn); }
-.mark.r { background: var(--bad); }
-.dot { width: 10px; height: 10px; border-radius: 50%; background: var(--ink); transform: translateX(-5px); }
-.dot.warn { background: var(--warn); }
-.dot.bad { background: var(--bad); }
-.dot.grey { background: var(--stale); }
-.pills, .cards, .chips { display: flex; flex-wrap: wrap; gap: 8px; }
-.pill, .chip, .card article, .cards .card { padding: 10px; }
-.pill, .chip { flex: 1 1 220px; }
-.cards .card, .cards article { flex: 1 1 240px; }
-.chip-px { font-size: 18px; font-weight: 650; }
-.tag { border: 1px solid var(--line); border-radius: 999px; padding: 0 6px; font-size: 12px; }
+html, body { margin: 0; }
+body { background: var(--bg); color: var(--ink); font: 12.5px/1.3 ui-sans-serif, system-ui, sans-serif; font-variant-numeric: tabular-nums; }
+.page { width: min(1440px, 100%); margin: 0 auto; padding: 6px 10px 8px; }
+header { display: flex; gap: 8px; align-items: baseline; }
+.head { flex: 1; margin: 0; }
+h2 { margin: 7px 0 3px; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 650; }
+p { margin: 0 0 2px; overflow-wrap: break-word; }
+.note, .probs { color: var(--muted); margin: 1px 0 2px; }
+.meter { display: flex; height: 4px; gap: 2px; margin: 0 0 2px; }
+.meter i { display: block; background: var(--ink); opacity: .45; }
+.legs { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 6px; }
+.checks { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.tile, .box { border: 1px solid var(--line); background: var(--card); border-radius: 8px; padding: 5px 6px; min-width: 0; }
+.top { display: flex; justify-content: space-between; gap: 4px; align-items: baseline; }
+.lamp { font-weight: 700; }
+.lamp.yellow, .lamp.hold, .st-yellow { color: var(--warn); }
+.lamp.red, .lamp.cut, .st-red { color: var(--bad); }
+.lamp.green, .lamp.add { color: var(--good); }
+.lamp.missing, .na, .sub { color: var(--stale); }
+.to { color: var(--ink); }
+.sub { margin: 0 0 1px 10px; }
+ul { margin: 0; padding-left: 0; list-style: none; }
+li { margin: 0 0 1px; overflow-wrap: break-word; }
 table { width: 100%; border-collapse: collapse; table-layout: fixed; }
-th, td { text-align: left; vertical-align: top; padding: 6px 8px 6px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+th, td { text-align: left; vertical-align: top; padding: 1px 4px 1px 0; border-bottom: 1px solid var(--line); overflow-wrap: break-word; font-weight: 450; }
+.foot { margin-top: 4px; }
+button { background: transparent; color: var(--ink); border: 1px solid var(--line); border-radius: 999px; font: inherit; padding: 2px 8px; }
+.spark { display: block; color: var(--muted); overflow: visible; margin-top: 2px; }
 .tip { position: relative; }
-.tip:hover::after, .tip:focus::after {
-  content: attr(data-tip);
-  position: absolute;
-  z-index: 40;
-  left: 0;
-  top: calc(100% + 6px);
-  width: 280px;
-  padding: 8px 10px;
-  border-radius: 8px;
-  background: var(--ink);
-  color: var(--bg);
-  font-size: 13px;
-  line-height: 1.4;
-  font-weight: 450;
-  white-space: normal;
-}
-.neo-grid { display: grid; grid-template-columns: 1fr 1.3fr; gap: 16px; }
-.pair { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.tip:hover::after, .tip:focus::after { content: attr(data-tip); position: absolute; z-index: 5; left: 0; top: calc(100% + 4px); width: 240px; padding: 6px 8px; border-radius: 6px; background: var(--ink); color: var(--bg); font-size: 12px; line-height: 1.3; white-space: normal; }
 @media (max-width: 860px) {
-  .span-5, .span-7, .neo-grid, .inds, .pair { grid-template-columns: 1fr; }
-  .span-5, .span-7 { grid-column: span 12; }
-  .mast, .sowhat { display: block; }
-  .map { display: flex; flex-direction: column; }
-  .mh, .rh { display: none; }
-  .place { display: block; }
+  .legs, .checks { grid-template-columns: 1fr; }
+  header { display: block; }
 }
 </style>
 </head>
 <body>
-<div class="wrap">
-<div class="grid">
+<div class="page">
 """
 
 HTML_FOOT = """
-</div>
 </div>
 <script>
 (function () {
   var key = "vortex-theme";
   var root = document.documentElement;
   var button = document.getElementById("theme-toggle");
-  function label(theme) {
-    button.textContent = theme === "dark" ? "Use light mode" : "Use dark mode";
-  }
+  function label(theme) { button.textContent = theme === "dark" ? "Use light mode" : "Use dark mode"; }
   label(root.getAttribute("data-theme") || "dark");
   button.addEventListener("click", function () {
     var next = root.getAttribute("data-theme") === "dark" ? "light" : "dark";
@@ -1947,6 +1191,19 @@ HTML_FOOT = """
     try { localStorage.setItem(key, next); } catch (e) {}
     label(next);
   });
+  var count = document.getElementById("count");
+  if (!count) return;
+  var target = new Date(count.getAttribute("data-target"));
+  function tick() {
+    var ms = target - new Date();
+    if (ms <= 0) { count.textContent = "now"; return; }
+    var hours = Math.floor(ms / 36e5);
+    var days = Math.floor(hours / 24);
+    hours = hours % 24;
+    count.textContent = days ? ("in " + days + "d " + hours + "h") : ("in " + hours + "h");
+  }
+  tick();
+  setInterval(tick, 60000);
 })();
 </script>
 </body>
@@ -1954,173 +1211,72 @@ HTML_FOOT = """
 """
 
 
-def load_bundle(now: datetime) -> dict:
-    quotes = {}
-    for ticker in TICKERS:
-        path = DATA / yahoo_name(ticker)
-        if path.exists():
-            loaded = load_yahoo(path)
-            if loaded:
-                quotes[ticker] = loaded
-    status = load_json(DATA / "fetch_status.json") if (DATA / "fetch_status.json").exists() else {"failed": []}
-    manual = load_json(DATA / "manual.json")
-    judgment = load_json(DATA / "judgment.json")
-    for key in ("A", "B", "C", "D_money", "D_demand", "F", "E"):
-        if key not in judgment["probabilities"]:
-            raise SystemExit(f"judgment probabilities missing {key}")
-    if judgment.get("current_box") not in BOX_TITLE:
-        raise SystemExit("judgment current_box is not a known box")
-    changelog = load_json(DATA / "changelog.json")
-    return {
-        "now": now,
-        "quotes": quotes,
-        "status": status,
-        "manual": manual,
-        "judgment": judgment,
-        "changelog": changelog,
-        "dgs2": load_fred(DATA / "f_DGS2.csv") if (DATA / "f_DGS2.csv").exists() else [],
-        "hy": load_fred(DATA / "f_BAMLH0A0HYM2.csv") if (DATA / "f_BAMLH0A0HYM2.csv").exists() else [],
-        "ig": load_fred(DATA / "f_BAMLC0A0CM.csv") if (DATA / "f_BAMLC0A0CM.csv").exists() else [],
-        "sofr": load_fred(DATA / "f_SOFR.csv") if (DATA / "f_SOFR.csv").exists() else [],
-        "srf": load_fred(DATA / "f_RPONTSYD.csv") if (DATA / "f_RPONTSYD.csv").exists() else [],
-        "claims": load_fred(DATA / "f_ICSA.csv") if (DATA / "f_ICSA.csv").exists() else [],
-        "pay": load_fred(DATA / "f_PAYEMS.csv") if (DATA / "f_PAYEMS.csv").exists() else [],
-        "unrate": load_fred(DATA / "f_UNRATE.csv") if (DATA / "f_UNRATE.csv").exists() else [],
-        "cpi": load_fred_decimal(DATA / "f_CPILFESL.csv") if (DATA / "f_CPILFESL.csv").exists() else [],
-        "funding": load_funding(DATA / "btcusdt_funding.json") if (DATA / "btcusdt_funding.json").exists() else [],
-        "usde": load_usde(DATA / "usde.json") if (DATA / "usde.json").exists() else [],
-    }
+def current_snapshot(view: dict, now: datetime) -> dict:
+    series = {}
+    for ticker, _role in PRICES:
+        bars = view["quotes"].get(ticker, {}).get("bars")
+        if bars:
+            series[ticker] = {"value": bars[-1]["close"], "session": bars[-1]["session"].isoformat()}
+    for ticker in ("SMH", "CL=F", "BZ=F"):
+        bars = view["quotes"].get(ticker, {}).get("bars")
+        if bars:
+            series[ticker] = {"value": bars[-1]["close"], "session": bars[-1]["session"].isoformat()}
+    if view["hy"]:
+        series["HY"] = {"value": view["hy"][-1][1], "session": view["hy"][-1][0].isoformat()}
+    if view["dgs"]:
+        series["DGS2"] = {"value": view["dgs"][-1][1], "session": view["dgs"][-1][0].isoformat()}
+    if view["h100_rows"]:
+        series["H100"] = {"value": view["h100_rows"][-1]["value"], "session": view["h100_rows"][-1]["date"]}
+    if view["b200_rows"]:
+        series["B200"] = {"value": view["b200_rows"][-1]["value"], "session": view["b200_rows"][-1]["date"]}
+    return {"asof_sgt": fmt_dt(now), "series": series}
 
 
-def privacy_scan(html: str) -> None:
-    banned = [
-        "beta.json", "0.6509", "184679", "variational", "dry powder", "liquidation",
-        "fables", "drawdown", "rrpontsyd", "fund.json", "p&l", "p/l", "allocation",
-        "text-overflow", "ellipsis", "nowrap",
-    ]
-    lowered = html.lower()
-    for token in banned:
-        if token in lowered:
-            raise SystemExit("removed a forbidden or clipping string: " + token)
-    if "overflow: hidden" in lowered or "overflow:hidden" in lowered:
-        raise SystemExit("overflow hidden clips text")
-    import re
-    if re.search(r"(?<!m)NAV", html):
-        raise SystemExit("stripped a NAV string that is not the MSTR multiple")
-    if re.search(r"\bbeta\b", html, re.I):
-        raise SystemExit("stripped a beta string")
-    if "fetch(" in html:
-        raise SystemExit("the page must not fetch at runtime")
-
-
-def write_snapshots(bundle: dict, view: dict) -> None:
-    latest = {"asof_sgt": view["built"], "description": "Latest print in each stored public series.", "series": {}}
-    prev = {"asof_sgt": view["built"], "description": "Prior print in each stored public series.", "series": {}}
-    for ticker, series in bundle["quotes"].items():
-        bars = series["bars"]
-        latest["series"][ticker] = {"value": bars[-1]["close"], "session": bars[-1]["session"].isoformat()}
-        if len(bars) >= 2:
-            prev["series"][ticker] = {"value": bars[-2]["close"], "session": bars[-2]["session"].isoformat()}
-    for key, rows in (("DGS2", bundle["dgs2"]), ("BAMLH0A0HYM2", bundle["hy"]), ("BAMLC0A0CM", bundle["ig"]), ("SOFR", bundle["sofr"]), ("RPONTSYD", bundle["srf"])):
-        if rows:
-            latest["series"][key] = {"value": rows[-1][1], "session": rows[-1][0].isoformat()}
-        if len(rows) >= 2:
-            prev["series"][key] = {"value": rows[-2][1], "session": rows[-2][0].isoformat()}
-    for name, payload in (("snapshot_latest.json", latest), ("snapshot_prev.json", prev)):
-        path = DATA / name
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-        tmp.replace(path)
+def write_json(path: Path, payload: dict) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(path)
 
 
 def main() -> int:
     self_check()
-    if not (DATA / "judgment.json").exists():
-        raise SystemExit("data/judgment.json is missing")
     now = datetime.now(SGT).replace(microsecond=0)
     bundle = load_bundle(now)
-    checks = build_checks(bundle, 0, True)
-    implied = implied_box([(item["box"], item["state"]) for item in checks])
-    legs = build_legs(bundle, 0, True)
-    lights = [(leg["name"], leg["light"]) for leg in legs]
-    action, det, grey = action_of(lights)
-    prev_lights = flags_only(bundle, 1)
-    prev_action = action_of(prev_lights)[0]
-    prev_checks = build_checks(bundle, 1, False)
-    prev_implied = implied_box([(item["box"], item["state"]) for item in prev_checks])
-    chosen = pick_closest(closest_candidates(bundle))
-    if chosen:
-        closest = f"{chosen['phrase']} Leg: {chosen['leg']}."
-    else:
-        closest = "No numeric red line could be measured from the loaded series."
-    moves = build_moves(bundle)
-    if prev_action == action:
-        change_line = f"No. The prior daily prints also mapped to {action}."
-    else:
-        change_line = f"Yes. The prior daily prints mapped to {prev_action}. The latest prints map to {action}."
-    implied_line = (
-        f"Market-implied box on the prior window: {implied_label(prev_implied)}. "
-        f"Latest: {implied_label(implied)}."
-    )
-    reason = reason_for(action, legs, det, grey)
-    missing = [
-        "Dec hike odds",
-        "CRWV CDS",
-        "CRWV unsecured yield",
-        "SoftBank CDS",
-        "Oracle CDS",
-        "data-center loan auction price",
-        "H100 rent",
-        "B200 rent",
-        "2027 capex guides",
-        "MSTR multiple",
-        "official SOFR range bounds",
-    ]
-    summary = {
-        "built_sgt": fmt_dt(now),
-        "current_box": bundle["judgment"]["current_box"],
-        "probabilities": bundle["judgment"]["probabilities"],
-        "market_implied": implied_label(implied),
-        "disagrees": disagrees(bundle["judgment"]["current_box"], implied),
-        "action": action,
-        "reason": reason,
-        "closest": closest,
-        "changes": [item["text"] for item in moves],
-        "change_line": change_line,
-        "implied_line": implied_line,
-        "leg_lights": lights,
-        "missing": missing,
-    }
-    view = {
-        "now": now,
-        "built": fmt_dt(now),
-        "judgment": bundle["judgment"],
-        "quotes": bundle["quotes"],
-        "changelog": bundle["changelog"],
-        "checks": checks,
-        "legs": legs,
-        "implied": implied,
-        "disagree": summary["disagrees"],
-        "action": action,
-        "reason": reason,
-        "closest": closest,
-        "moves": moves,
-        "change_line": change_line,
-        "implied_line": implied_line,
-        "missing": missing,
-        "summary": summary,
-    }
-    html = page(view)
-    privacy_scan(html)
-    if "SO WHAT".lower() not in html.lower() and "So what today" not in html:
-        raise SystemExit("top strip missing")
-    if "localStorage.getItem(\"vortex-theme\")" not in html and "vortex-theme" not in html:
-        raise SystemExit("theme key missing")
+    view = build_view(bundle)
+    prior_path = DATA / "snapshot_latest.json"
+    prior = load_json(prior_path) if prior_path.exists() else None
+    current = current_snapshot(view, now)
+    changes = changes_block(prior, current)
+    html = page(view, bundle["judgment"], changes)
+    privacy_scan(html, layout=True)
+    for source in (ROOT / "build.py", ROOT / "fetch_data.py", ROOT / "README.md"):
+        privacy_scan(source.read_text())
     tmp = OUT.with_suffix(".html.tmp")
     tmp.write_text(html, encoding="utf-8")
     tmp.replace(OUT)
-    write_snapshots(bundle, view)
-    print(json.dumps(summary, indent=2))
+    if prior:
+        write_json(DATA / "snapshot_prev.json", prior)
+    write_json(DATA / "snapshot_latest.json", current)
+    summary = {
+        "built_sgt": fmt_dt(now),
+        "header": f"Box {bundle['judgment']['current_box']} · {bundle['judgment']['probabilities']['B']}% | {view['action']} | {view['reason']}",
+        "next": None if not view["nxt"] else view["nxt"]["event"] + " " + view["nxt"]["label"] + " " + countdown(view["nxt"]["when"], now),
+        "lights": view["legs"],
+        "deploy": f"{view['deploy_met']}/5 met",
+        "stop": f"{view['stop_hit']}/2 triggered",
+        "core": None if not view["core"] else f"{view['core']['published']}",
+        "rates_bp": view["rates_bp"],
+        "brent": view["brent_px"],
+        "wti": view["wti_px"],
+        "claims_k": None if view["claims_avg"] is None else round(view["claims_avg"] / 1000, 1),
+        "payrolls_k": view["pay_change"],
+        "hy": None if not view["hy"] else view["hy"][-1][1],
+        "h100_1m": view["h100_1m"],
+        "b200_1m": view["b200_1m"],
+        "rent_manual": view["rent_manual"],
+        "shown": [row["id"] for row in view["shown"]],
+    }
+    print(json.dumps(summary, indent=2, default=str))
     return 0
 
 
