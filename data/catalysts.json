@@ -1,0 +1,93 @@
+[
+  {
+    "id": "softbank-q2",
+    "when_sgt": "2026-11-10T15:30:00+08:00",
+    "label": "10 Nov 15:30 SGT",
+    "event": "SoftBank Q2",
+    "leg": "AI money",
+    "hits": ["CRWV", "NVDA"],
+    "scorecard": true
+  },
+  {
+    "id": "oct-cpi",
+    "when_sgt": "2026-11-10T21:30:00+08:00",
+    "label": "10 Nov 21:30 SGT",
+    "event": "Oct CPI",
+    "leg": "Inflation",
+    "hits": ["SPY", "2Y"],
+    "scorecard": false
+  },
+  {
+    "id": "crwv-q3",
+    "when_sgt": "2026-11-11T06:00:00+08:00",
+    "label": "11 Nov ~06:00 SGT",
+    "event": "CoreWeave Q3",
+    "leg": "AI money",
+    "hits": ["CRWV", "NBIS", "CRWV yield"],
+    "scorecard": true
+  },
+  {
+    "id": "nbis-q3",
+    "when_sgt": "2026-11-12T21:00:00+08:00",
+    "label": "12 Nov ~21:00 SGT",
+    "event": "Nebius Q3",
+    "leg": "AI money",
+    "hits": ["NBIS"],
+    "scorecard": true
+  },
+  {
+    "id": "nvda-q3",
+    "when_sgt": "2026-11-18T05:20:00+08:00",
+    "label": "18 Nov ~05:20 SGT",
+    "event": "Nvidia Q3",
+    "leg": "AI demand",
+    "hits": ["NVDA", "SMH"],
+    "scorecard": false
+  },
+  {
+    "id": "loan-auction",
+    "when_sgt": "2026-11-19T09:00:00+08:00",
+    "label": "19 Nov SGT",
+    "event": "Loan auction bids",
+    "leg": "AI money",
+    "hits": ["CRWV yield"],
+    "scorecard": false
+  },
+  {
+    "id": "oct-pce",
+    "when_sgt": "2026-11-25T21:30:00+08:00",
+    "label": "25 Nov 21:30 SGT",
+    "event": "Oct PCE",
+    "leg": "Inflation",
+    "hits": ["SPY", "2Y"],
+    "scorecard": false
+  },
+  {
+    "id": "nov-jobs",
+    "when_sgt": "2026-12-04T21:30:00+08:00",
+    "label": "4 Dec 21:30 SGT",
+    "event": "Nov jobs",
+    "leg": "Growth",
+    "hits": ["SPY"],
+    "scorecard": false
+  },
+  {
+    "id": "fomc-ercot",
+    "when_sgt": "2026-12-10T03:00:00+08:00",
+    "label": "10 Dec ~03:00 SGT",
+    "event": "FOMC + ERCOT report",
+    "leg": "Inflation, AI rules",
+    "hits": ["SPY", "2Y"],
+    "scorecard": false
+  },
+  {
+    "id": "texas-grid",
+    "when_sgt": "2026-12-17T09:00:00+08:00",
+    "label": "17 Dec SGT (UV)",
+    "event": "Texas grid decision (UV)",
+    "leg": "AI rules",
+    "hits": [],
+    "scorecard": false,
+    "uv": true
+  }
+]
