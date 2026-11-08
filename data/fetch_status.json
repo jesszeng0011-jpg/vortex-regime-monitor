@@ -1,0 +1,61 @@
+{
+  "ran_at_sgt": "2026-11-08T22:18:46+08:00",
+  "user_agent": "VortexRegimeMonitor/1.0",
+  "ok": [
+    "yahoo SPY",
+    "yahoo QQQ",
+    "yahoo IWM",
+    "yahoo SMH",
+    "yahoo XLE",
+    "yahoo XLP",
+    "yahoo TLT",
+    "yahoo NVDA",
+    "yahoo MSFT",
+    "yahoo AMZN",
+    "yahoo GOOGL",
+    "yahoo META",
+    "yahoo EQIX",
+    "yahoo DLR",
+    "yahoo VST",
+    "yahoo CIFR",
+    "yahoo HUT",
+    "yahoo IREN",
+    "yahoo WULF",
+    "yahoo RIOT",
+    "yahoo CRWV",
+    "yahoo NBIS",
+    "yahoo MSTR",
+    "yahoo STRC",
+    "yahoo CAT",
+    "yahoo GEV",
+    "yahoo APLD",
+    "yahoo CORZ",
+    "yahoo SPCX",
+    "yahoo ^NDX",
+    "yahoo BTC-USD",
+    "yahoo CL=F",
+    "yahoo BZ=F",
+    "fred DGS2",
+    "fred BAMLH0A0HYM2",
+    "fred BAMLC0A0CM",
+    "fred SOFR",
+    "fred RPONTSYD",
+    "fred ICSA",
+    "fred PAYEMS",
+    "fred UNRATE",
+    "fred CPILFESL",
+    "defillama usde"
+  ],
+  "failed": [
+    {
+      "id": "binance btcusdt funding",
+      "error": "HTTP Error 451: ",
+      "kept_existing": "True"
+    },
+    {
+      "id": "cme dec hike odds",
+      "error": "HTTP Error 404: Not Found",
+      "kept_existing": "False"
+    }
+  ]
+}

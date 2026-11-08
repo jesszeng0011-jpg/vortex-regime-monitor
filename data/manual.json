@@ -1,0 +1,8 @@
+{
+  "asof_sgt": "2026-11-08T21:00:00+08:00",
+  "source": "Status notes in the 8 Nov 2026 public rebuild brief. Not a live statute or grid feed.",
+  "signed_state_bans": 0,
+  "grid_pause_confirmed": false,
+  "texas_status": "ERCOT verification report is due 10 Dec 2026. The Texas grid decision is listed for 17 Dec 2026 and is unconfirmed (UV).",
+  "tceq_note": "TCEQ permit pause also covers off-grid gas. That note is not scored as a confirmed grid pause."
+}
