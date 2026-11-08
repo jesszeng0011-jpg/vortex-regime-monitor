@@ -743,15 +743,11 @@ def inflation_tile(view: dict) -> str:
     else:
         missing.append("core is under 0.3%")
     missing.append("oil is under $100")
-    brent_week = ret(view["brent"], 5) if view["brent"] else None
-    change = ""
-    if brent_week is not None:
-        change = tip(fmt_pct(brent_week), "Brent, five sessions.", move_class(brent_week))
     return tile(
         "Inflation",
         view["legs"]["inflation"],
         core_html,
-        change,
+        "",
         "2Y " + rate_html + "<br>" + oil_html("Brent", "BZ=F", view["brent"], view["brent_px"]) + " · " + oil_html("WTI", "CL=F", view["wti"], view["wti_px"]),
         esc("; ".join(missing)) + ".",
     )
@@ -828,9 +824,9 @@ def ratio_bits(view: dict) -> tuple[str, str]:
         f"1d {fmt_pct(one)}" + (f", 5 sessions {fmt_pct(week)}." if week is not None else ".")
         + " A ratio, not a price difference. " + session_phrase(quotes["CRWV"]["bars"][-1])
     )
-    html = tip(f"{vals[-1]:.2f}", detail) + spark(vals[-30:])
+    number = tip(f"{vals[-1]:.2f}", detail)
     week_html = "" if week is None else tip(fmt_pct(week), "Five-session change in the NBIS/CRWV ratio.", move_class(week))
-    return html, week_html
+    return number + ((" " + week_html) if week_html else "") + spark(vals[-30:]), ""
 
 
 def money_tile(view: dict) -> str:
@@ -838,12 +834,12 @@ def money_tile(view: dict) -> str:
     c = view["cds_m"]
     y_html = tip(y["label"], f"Manual {fmt_dt(datetime.fromisoformat(y['asof_sgt']))}. {y['source']}", "na" if view["yield_old"] else "st-yellow")
     c_html = tip(c["label"], f"Manual {fmt_dt(datetime.fromisoformat(c['asof_sgt']))}. {c['source']}", "na" if view["cds_old"] else "")
-    ratio, week = ratio_bits(view)
+    ratio, _week = ratio_bits(view)
     return tile(
         "AI money",
         view["legs"]["money"],
         y_html,
-        week,
+        "",
         "CDS " + c_html + "<br>NBIS/CRWV " + ratio,
         "auction below 90% of par, or pulled, and a CRWV funding flag. Bids 19 Nov; no auction print yet.",
     )
@@ -946,8 +942,8 @@ def checklist(view: dict) -> str:
         ("Nvidia orders intact", "18 Nov", "pending"),
     ]
     stop = [
-        ("AI money leg red", "live", "hit" if view["legs"]["money"] == "red" else "clear"),
-        ("HY OAS above 4.5%", "live", "hit" if view["hy_red"] else "clear"),
+        ("AI money leg red", "clear" if view["legs"]["money"] != "red" else "triggered", "hit" if view["legs"]["money"] == "red" else "clear"),
+        ("HY OAS above 4.5%", "clear" if not view["hy_red"] else "triggered", "hit" if view["hy_red"] else "clear"),
     ]
 
     def icon(state: str) -> str:
@@ -956,7 +952,7 @@ def checklist(view: dict) -> str:
         if state in ("hit", "failed"):
             return '<span class="mark bad">✗</span>'
         if state == "clear":
-            return '<span class="mark good">✓</span>'
+            return '<span class="mark wait">○</span>'
         return '<span class="mark wait">○</span>'
 
     def rows(items) -> str:
