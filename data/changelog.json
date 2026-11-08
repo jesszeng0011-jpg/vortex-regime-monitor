@@ -1,0 +1,9 @@
+[
+  {
+    "date_sgt": "2026-11-08T21:00:00+08:00",
+    "what": "Public rebuild. Book panel removed. Market-implied block added. Freshness follows the release cadence.",
+    "old": "\u2014",
+    "new": "\u2014",
+    "source": "This repository"
+  }
+]

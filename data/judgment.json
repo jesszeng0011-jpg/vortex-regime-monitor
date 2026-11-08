@@ -1,0 +1,15 @@
+{
+  "asof_sgt": "2026-11-08T21:00:00+08:00",
+  "current_box": "B",
+  "last_box": null,
+  "probabilities": {
+    "A": 7,
+    "B": 40,
+    "C": 10,
+    "D_money": 25,
+    "D_demand": null,
+    "F": 15,
+    "E": 3
+  },
+  "note": "Jess's judgment on 8 Nov 2026. D-money is the stated D weight. D-demand was not given a separate probability. The six stated weights sum to 100. One confirmed red channel moves 10 points from B to that box. This file is hand-entered. The weekday refresh must not overwrite it."
+}

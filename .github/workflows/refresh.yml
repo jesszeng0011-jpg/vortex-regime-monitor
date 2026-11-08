@@ -1,0 +1,47 @@
+name: Refresh market data
+
+on:
+  schedule:
+    # 07:30 SGT weekdays = 23:30 UTC the previous calendar day (Sun-Thu UTC).
+    - cron: "30 23 * * 0-4"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: refresh-market-data
+  cancel-in-progress: true
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Fetch public market data
+        run: python fetch_data.py
+
+      - name: Rebuild dashboard
+        run: python build.py
+
+      - name: Commit and push if the page changed
+        run: |
+          # Hand-entered files. Never replace them with a fetch or a rebuild.
+          git checkout HEAD -- data/judgment.json data/manual.json data/changelog.json
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index.html data
+          git checkout HEAD -- data/judgment.json data/manual.json data/changelog.json
+          if git diff --staged --quiet; then
+            echo "No market-data changes"
+          else
+            git commit -m "Refresh market data ($(date -u +%Y-%m-%dT%H:%MZ))"
+            git push
+          fi
