@@ -326,6 +326,21 @@ def money_is_red(auction_state: str, funding_flag: bool) -> bool:
     return auction_state == "red" and funding_flag
 
 
+def rules_light(texas: dict, stale: bool) -> str:
+    """Red is a signed ban or a pause beyond the current audit freeze.
+
+    audit_tied_pause is the Abbott-era audit and TCEQ halt. It is yellow.
+    It must not be stored in signed_ban or grid_pause_confirmed.
+    """
+    if stale:
+        return "missing"
+    if texas.get("signed_ban") or texas.get("grid_pause_confirmed"):
+        return "red"
+    if texas.get("audit_tied_pause"):
+        return "yellow"
+    return "green"
+
+
 def header_action(money_red: bool, hy_red: bool) -> str:
     if money_red or hy_red:
         return "CUT"
@@ -363,6 +378,12 @@ def self_check() -> None:
     assert money_is_red("red", True) is True
     assert money_is_red("pending", True) is False
     assert money_is_red("yellow", True) is False
+    yellow_pause = {"signed_ban": False, "grid_pause_confirmed": False, "audit_tied_pause": True}
+    assert rules_light(yellow_pause, False) == "yellow"
+    assert rules_light({**yellow_pause, "grid_pause_confirmed": True}, False) == "red"
+    assert rules_light({"signed_ban": True, "grid_pause_confirmed": False}, False) == "red"
+    assert rules_light({"signed_ban": False, "grid_pause_confirmed": False}, False) == "green"
+    assert rules_light(yellow_pause, True) == "missing"
     sample = [
         {"when_sgt": "2026-11-10T15:30:00+08:00", "id": "a"},
         {"when_sgt": "2026-11-25T21:30:00+08:00", "id": "b"},
@@ -502,8 +523,7 @@ def build_view(bundle: dict) -> dict:
     texas = manual["texas"]
     texas_asof = datetime.fromisoformat(texas["asof_sgt"])
     texas_old = manual_stale(texas_asof, now)
-    rules_red = bool((texas.get("signed_ban") or texas.get("grid_pause_confirmed")) and not texas_old)
-    rules = "red" if rules_red else ("missing" if texas_old else "green")
+    rules = rules_light(texas, texas_old)
 
     yield_m = manual["crwv_yield"]
     cds_m = manual["crwv_cds"]
@@ -794,15 +814,19 @@ def growth_tile(view: dict) -> str:
 
 def rules_tile(view: dict) -> str:
     texas = view["texas"]
-    kind = "na" if view["texas_old"] else ""
-    line = tip(texas["line"], f"Manual {fmt_dt(datetime.fromisoformat(texas['asof_sgt']))}. {texas['source']}", kind)
+    light = view["legs"]["rules"]
+    kind = "na" if view["texas_old"] else ("st-yellow" if light == "yellow" else ("st-red" if light == "red" else ""))
+    detail = f"Manual {fmt_dt(datetime.fromisoformat(texas['asof_sgt']))}. {texas['source']}"
+    line = tip(texas["line"], detail, kind)
+    note = texas.get("detail") or ""
+    body = tip(note, detail) if note else ""
     return tile(
         "AI rules",
-        view["legs"]["rules"],
+        light,
         line,
         "",
-        "",
-        "a signed ban in a major state, or a confirmed grid pause.",
+        body,
+        "a signed major-state ban, or a broader pause beyond this audit-tied freeze (such as a signed Hinojosa moratorium).",
         key_class="key sentence",
     )
 
