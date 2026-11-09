@@ -25,11 +25,13 @@
     "source": "Fund Assistant official, 8 Nov 2026. Manual on this page."
   },
   "texas": {
-    "asof_sgt": "2026-11-08T22:49:00+08:00",
-    "line": "ERCOT report Dec 10 · decision Dec 17 (UV)",
+    "asof_sgt": "2026-11-09T09:00:00+08:00",
+    "line": "Pause in effect",
+    "detail": "Aug 3 grid-connect audit (fail = no interconnect). Sep 21 TCEQ permit halt. No signed ban. Under 25 MW exempt. Next: ERCOT report Dec 10 · decision Dec 17 (UV).",
     "signed_ban": false,
     "grid_pause_confirmed": false,
+    "audit_tied_pause": true,
     "manual": true,
-    "source": "8 Nov 2026 memo. The decision date is unconfirmed. No signed ban or confirmed grid pause is entered."
+    "source": "Texas Tribune, 4 Nov 2026; King & Spalding, 6 Nov 2026. Entered 9 Nov 2026. Abbott's 3 Aug 2026 PUCT/ERCOT audit and 21 Sep 2026 TCEQ halt, including on-site gas, are in effect until the waitlist audit is done. Fail the audit and the interconnect is denied. Loads under 25 MW are exempt. No signed statewide ban. Hinojosa's moratorium is a campaign pledge; he takes office 19 Jan 2027."
   }
 }
