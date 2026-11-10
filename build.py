@@ -83,7 +83,13 @@ def trading_lag(obs: date, latest: date) -> int:
 
 
 def weekly_stale(obs: date, now: datetime) -> bool:
-    return (now.astimezone(SGT).date() - obs).days > 8
+    """ICSA week ends Saturday and is released the following Thursday at 20:30 SGT.
+
+    Stale only once that release is more than 8 days old, so the next Thursday
+    print is overdue by more than a day.
+    """
+    release = datetime(obs.year, obs.month, obs.day, 20, 30, tzinfo=SGT) + timedelta(days=5)
+    return now.astimezone(SGT) > release + timedelta(days=8)
 
 
 def add_month(year: int, month: int, step: int = 1) -> tuple[int, int]:
@@ -366,6 +372,8 @@ def self_check() -> None:
     assert latest_completed_session(now) == date(2026, 11, 6)
     assert trading_lag(date(2026, 11, 5), date(2026, 11, 6)) == 1
     assert weekly_stale(date(2026, 10, 31), now) is False
+    assert weekly_stale(date(2026, 10, 31), datetime(2026, 11, 10, 11, 0, tzinfo=SGT)) is False
+    assert weekly_stale(date(2026, 10, 31), datetime(2026, 11, 14, 0, 0, tzinfo=SGT)) is True
     assert latest_released_month(now, "cpi") == date(2026, 9, 1)
     assert latest_released_month(now, "jobs") == date(2026, 10, 1)
     aug = (Decimal("337.765") / Decimal("336.789") - 1) * 100
