@@ -347,10 +347,32 @@ def rules_light(texas: dict, stale: bool) -> str:
     return "green"
 
 
-def header_action(money_red: bool, hy_red: bool) -> str:
+def header_action(money_red: bool, hy_red: bool, inflation_red: bool = False) -> str:
+    """CUT only for a Stop item: AI money red, or HY OAS above 4.5%.
+
+    A red inflation leg is not a stop. inflation_red is accepted so a caller
+    can pass it without changing the result.
+    """
+    del inflation_red
     if money_red or hy_red:
         return "CUT"
     return "HOLD"
+
+
+def inflation_light(computed: str, manual: dict, core: dict | None) -> tuple[str, dict | None]:
+    """Use a dated hand print only until FRED contains that month."""
+    row = manual.get("inflation_print") if isinstance(manual, dict) else None
+    if not isinstance(row, dict) or not row.get("covers_month"):
+        return computed, None
+    covers = date.fromisoformat(row["covers_month"])
+    if core and core.get("month") and core["month"] >= covers:
+        return computed, None
+    return str(row.get("light") or computed), row
+
+
+HOLD_WHEN_INFLATION_RED = (
+    "Inflation red → Rate squeeze risk up; no Stop trigger (AI money yellow, HY OAS < 4.5%)"
+)
 
 
 def visible_catalyst(event: dict, now: datetime) -> bool:
@@ -383,6 +405,12 @@ def self_check() -> None:
     assert header_action(False, False) == "HOLD"
     assert header_action(True, False) == "CUT"
     assert header_action(False, True) == "CUT"
+    assert header_action(False, False, True) == "HOLD"
+    assert header_action(True, False, True) == "CUT"
+    oct_print = {"inflation_print": {"covers_month": "2026-10-01", "light": "red"}}
+    assert inflation_light("yellow", oct_print, {"month": date(2026, 9, 1)}) == ("red", oct_print["inflation_print"])
+    assert inflation_light("green", oct_print, {"month": date(2026, 10, 1)}) == ("green", None)
+    assert inflation_light("missing", {}, None) == ("missing", None)
     assert money_is_red("red", True) is True
     assert money_is_red("pending", True) is False
     assert money_is_red("yellow", True) is False
@@ -512,6 +540,7 @@ def build_view(bundle: dict) -> dict:
         inflation = "missing"
     else:
         inflation = "green"
+    inflation, inflation_override = inflation_light(inflation, manual, core)
 
     claims = bundle["claims"]
     claims_old = len(claims) < 4 or weekly_stale(claims[-1][0], now)
@@ -606,7 +635,7 @@ def build_view(bundle: dict) -> dict:
         "demand": demand,
         "spill": spill,
     }
-    action = header_action(legs["money"] == "red", hy_red)
+    action = header_action(legs["money"] == "red", hy_red, inflation == "red")
 
     hy_gap = (4.5 - hy[-1][1]) if hy and not hy_old else None
     closest = "Closest to CUT: HY OAS is not loaded."
@@ -628,6 +657,8 @@ def build_view(bundle: dict) -> dict:
     else:
         why = why + "; the stop list is clear"
     reason = f"{why}. {closest}"
+    if action == "HOLD" and inflation == "red" and inflation_override:
+        reason = HOLD_WHEN_INFLATION_RED
 
     events = []
     for row in bundle["catalysts"]:
@@ -647,6 +678,7 @@ def build_view(bundle: dict) -> dict:
         "core": core,
         "prior": prior,
         "cpi_old": cpi_old,
+        "inflation_override": inflation_override,
         "rates_bp": rates_bp,
         "rates_up": rates_up,
         "twice": twice,
@@ -730,6 +762,7 @@ def tile(name: str, light: str, key_html: str, change_html: str, body: str, to_r
 
 def inflation_tile(view: dict) -> str:
     core, prior = view["core"], view["prior"]
+    override = view.get("inflation_override")
     if core:
         kind = "st-yellow" if view["legs"]["inflation"] == "yellow" else ("st-red" if view["legs"]["inflation"] == "red" else "")
         if view["cpi_old"]:
@@ -771,12 +804,30 @@ def inflation_tile(view: dict) -> str:
     else:
         missing.append("core is under 0.3%")
     missing.append("oil is under $100")
+    oils = "2Y " + rate_html + "<br>" + oil_html("Brent", "BZ=F", view["brent"], view["brent_px"]) + " · " + oil_html("WTI", "CL=F", view["wti"], view["wti_px"])
+    if override:
+        detail = (
+            f"Manual {fmt_dt(datetime.fromisoformat(override['asof_sgt']))}. {override.get('source', '')} "
+            "Shown until FRED CPILFESL includes this month."
+        )
+        core_html = tip(override["line"], detail, "st-red")
+        headline = override.get("headline") or ""
+        oils = (tip(headline, detail, "st-red") + "<br>" if headline else "") + oils
+        return tile(
+            "Inflation",
+            view["legs"]["inflation"],
+            core_html,
+            "",
+            oils,
+            "this Oct print is the third 0.3% with the 2-year yield up. Oil above $100 is a separate path.",
+            key_class="key sentence",
+        )
     return tile(
         "Inflation",
         view["legs"]["inflation"],
         core_html,
         "",
-        "2Y " + rate_html + "<br>" + oil_html("Brent", "BZ=F", view["brent"], view["brent_px"]) + " · " + oil_html("WTI", "CL=F", view["wti"], view["wti_px"]),
+        oils,
         esc("; ".join(missing)) + ".",
     )
 
@@ -1166,6 +1217,18 @@ def ratio_row(view: dict) -> str:
         f"<td class='num'>{tip(fmt_pct(five), 'Five-session change in the ratio.', move_class(five))}</td>"
         f"<td>{spark(vals[-20:], 72, 12)}</td><td class='num'>{since}</td></tr>"
     )
+
+
+def changelog_html() -> str:
+    path = DATA / "changelog.json"
+    if not path.exists():
+        return ""
+    lines = []
+    for row in load_json(path):
+        line = row.get("line")
+        if line:
+            lines.append(f"<p>{esc(line)}</p>")
+    return "".join(reversed(lines))
 
 
 def changes_block(prior: dict | None, current: dict) -> str:
@@ -1571,7 +1634,11 @@ def main() -> int:
     prior_path = DATA / "snapshot_latest.json"
     prior = load_json(prior_path) if prior_path.exists() else None
     current = current_snapshot(view, now)
-    changes = changes_block(prior, current)
+    market = changes_block(prior, current)
+    logged = changelog_html()
+    if logged and "no tracked print moved" in market:
+        market = ""
+    changes = logged + market
     html = page(view, bundle["judgment"], changes)
     privacy_scan(html, layout=True)
     for source in (ROOT / "build.py", ROOT / "fetch_data.py", ROOT / "README.md"):

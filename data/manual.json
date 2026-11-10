@@ -24,6 +24,14 @@
     "manual": true,
     "source": "Fund Assistant official, 8 Nov 2026. Manual on this page."
   },
+  "inflation_print": {
+    "asof_sgt": "2026-11-10T22:05:00+08:00",
+    "covers_month": "2026-10-01",
+    "light": "red",
+    "line": "Oct core CPI +0.3% m/m vs 0.2% expected, third straight 0.3% (Aug\u2013Oct); 2Y up ~15bp to ~4.70% \u2014 BLS / CNBC, 10 Nov 2026",
+    "headline": "Headline CPI +0.4% vs 0.3% expected",
+    "source": "BLS / CNBC, 10 Nov 2026. Hand entry until FRED CPILFESL includes October."
+  },
   "texas": {
     "asof_sgt": "2026-11-09T09:00:00+08:00",
     "line": "Pause in effect",
