@@ -5,5 +5,13 @@
     "old": "\u2014",
     "new": "\u2014",
     "source": "This repository"
+  },
+  {
+    "date_sgt": "2026-11-10T22:05:00+08:00",
+    "line": "10 Nov 22:05 SGT \u00b7 Oct CPI hot \u00b7 B 40\u219230, C 10\u219220 (Jess)",
+    "what": "Oct CPI hot",
+    "old": "B 40, C 10",
+    "new": "B 30, C 20",
+    "source": "Jess"
   }
 ]
