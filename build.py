@@ -359,6 +359,52 @@ def header_action(money_red: bool, hy_red: bool, inflation_red: bool = False) ->
     return "HOLD"
 
 
+def gpu_observation(rows: list[dict], now: datetime, name: str) -> dict:
+    last = rows[-1]
+    day = date.fromisoformat(last["date"])
+    stale = (now.astimezone(SGT).date() - day).days > 1
+    week = None
+    if len(rows) >= 2:
+        target = day - timedelta(days=7)
+        prior = min(rows[:-1], key=lambda row: abs((date.fromisoformat(row["date"]) - target).days))
+        if prior.get("value"):
+            week = last["value"] / prior["value"] - 1
+    window = [row["value"] for row in rows if row.get("value") and (day - date.fromisoformat(row["date"])).days <= 30]
+    high = max(window) if window else None
+    return {
+        "name": name,
+        "price": last["value"],
+        "week": week,
+        "high": high,
+        "date": day,
+        "stale": stale,
+        "status": gpu_rental_status(week, last["value"], high, stale),
+        "new_high": high is not None and last["value"] >= high - 1e-9,
+        "manual": False,
+    }
+
+
+def gpu_rental_status(week: float | None, price: float | None, high: float | None, stale: bool) -> str:
+    """Yellow if the 7-day change is below −5% or the price is more than 10% under its 30-day high.
+
+    A stale print stays grey and does not trip yellow.
+    """
+    if stale or week is None or price is None or high is None or high <= 0:
+        return "missing"
+    if week < -0.05 or price < high * 0.90:
+        return "yellow"
+    return "green"
+
+
+def demand_with_gpu(base: str, gpu: str) -> str:
+    """The rental rule is one more yellow input. It does not clear a red or a missing leg."""
+    if base in ("red", "missing"):
+        return base
+    if base == "yellow" or gpu == "yellow":
+        return "yellow"
+    return base
+
+
 def inflation_light(computed: str, manual: dict, core: dict | None) -> tuple[str, dict | None]:
     """Use a dated hand print only until FRED contains that month."""
     row = manual.get("inflation_print") if isinstance(manual, dict) else None
@@ -411,6 +457,19 @@ def self_check() -> None:
     assert inflation_light("yellow", oct_print, {"month": date(2026, 9, 1)}) == ("red", oct_print["inflation_print"])
     assert inflation_light("green", oct_print, {"month": date(2026, 10, 1)}) == ("green", None)
     assert inflation_light("missing", {}, None) == ("missing", None)
+    assert gpu_rental_status(0.0338, 3.06, 3.06, False) == "green"
+    assert gpu_rental_status(0.0657, 6.97, 6.97, False) == "green"
+    assert gpu_rental_status(-0.05, 1.0, 1.0, False) == "green"
+    assert gpu_rental_status(-0.0501, 1.0, 1.0, False) == "yellow"
+    assert gpu_rental_status(0.0, 0.90, 1.0, False) == "green"
+    assert gpu_rental_status(0.0, 0.89, 1.0, False) == "yellow"
+    assert gpu_rental_status(-0.08, 3.06, 3.06, True) == "missing"
+    assert demand_with_gpu("green", "green") == "green"
+    assert demand_with_gpu("green", "yellow") == "yellow"
+    assert demand_with_gpu("green", "missing") == "green"
+    assert demand_with_gpu("yellow", "green") == "yellow"
+    assert demand_with_gpu("red", "yellow") == "red"
+    assert demand_with_gpu("missing", "yellow") == "missing"
     assert money_is_red("red", True) is True
     assert money_is_red("pending", True) is False
     assert money_is_red("yellow", True) is False
@@ -609,6 +668,15 @@ def build_view(bundle: dict) -> dict:
         demand = "yellow"
     else:
         demand = "green"
+    gpu_rows = []
+    if h100_rows:
+        gpu_rows.append(gpu_observation(h100_rows, now, "H100"))
+    if b200_rows:
+        gpu_rows.append(gpu_observation(b200_rows, now, "B200"))
+    gpu_status = "yellow" if any(row["status"] == "yellow" for row in gpu_rows) else "green"
+    if not gpu_rows:
+        gpu_status = "missing"
+    demand = demand_with_gpu(demand, gpu_status)
 
     hy = bundle["hy"]
     sofr = bundle["sofr"]
@@ -703,6 +771,8 @@ def build_view(bundle: dict) -> dict:
         "yield_old": yield_old,
         "cds_old": cds_old,
         "h100_rows": h100_rows,
+        "gpu_rental": gpu_rows,
+        "gpu_fetched": (silicon or {}).get("fetched_at_sgt"),
         "b200_rows": b200_rows,
         "rent_manual": rent_manual,
         "rents_old": rents_old,
@@ -928,6 +998,89 @@ def money_tile(view: dict) -> str:
     )
 
 
+def gpu_pct(week: float | None) -> str:
+    if week is None:
+        return DASH
+    return f"{week * 100:+.2f}%"
+
+
+def manual_gpu_rows(manual: dict, now: datetime) -> list[dict]:
+    if not isinstance(manual, dict) or manual.get("h100_usd") is None:
+        return []
+    if manual.get("data_date"):
+        day = date.fromisoformat(manual["data_date"])
+    else:
+        day = datetime.fromisoformat(manual["asof_sgt"]).astimezone(SGT).date()
+    stale = (now.astimezone(SGT).date() - day).days > 1
+    rows = []
+    for name, price_key, week_key, high_key in (
+        ("H100", "h100_usd", "h100_7d", "h100_high_30d"),
+        ("B200", "b200_usd", "b200_7d", "b200_high_30d"),
+    ):
+        price = manual.get(price_key)
+        week = manual.get(week_key)
+        high = manual.get(high_key)
+        if not isinstance(price, (int, float)):
+            continue
+        rows.append({
+            "name": name,
+            "price": price,
+            "week": week if isinstance(week, (int, float)) else None,
+            "high": high if isinstance(high, (int, float)) else None,
+            "date": day,
+            "stale": stale,
+            "status": gpu_rental_status(
+                week if isinstance(week, (int, float)) else None,
+                price,
+                high if isinstance(high, (int, float)) else None,
+                stale,
+            ),
+            "new_high": isinstance(high, (int, float)) and price >= high - 1e-9,
+            "manual": True,
+            "source": manual.get("source", ""),
+        })
+    return rows
+
+
+def gpu_rental_html(view: dict) -> str:
+    rows = list(view.get("gpu_rental") or [])
+    hand = False
+    if not rows:
+        rows = manual_gpu_rows(view["manual"].get("silicon_data") or {}, view["now"])
+        hand = True
+    if not rows:
+        return ""
+    bits = []
+    for row in rows:
+        kind = {"green": "st-green", "yellow": "st-yellow"}.get(row["status"], "na")
+        detail = (
+            "Silicon Data SiliconIndex, public free tier, daily. "
+            "Standardized like-for-like neo-cloud hourly rent, $/GPU·h. "
+            f"{row['name']} as of {fmt_day(row['date'])} SGT. "
+            f"7-day change {gpu_pct(row['week'])}. "
+        )
+        if isinstance(row.get("high"), (int, float)):
+            detail += f"30-day high ${row['high']:.2f}/h. "
+        fetched = view.get("gpu_fetched")
+        if fetched and not row.get("manual"):
+            detail += f"Fetched {fmt_dt(datetime.fromisoformat(fetched))}. "
+        if row.get("manual"):
+            detail += (row.get("source") or "Hand entry.") + " "
+        detail += "Silicon Data only."
+        shown = tip(f"{row['name']} ${row['price']:.2f}/h {gpu_pct(row['week'])} 7d", detail, kind)
+        if row.get("new_high"):
+            shown += ' <span class="muted">new high</span>'
+        bits.append(shown)
+    asof = " · ".join(dict.fromkeys(fmt_day(row["date"]) + " SGT" for row in rows))
+    source = "Silicon Data" + (" manual" if hand else "")
+    return (
+        '<p class="gpu"><span class="k">GPU rental</span><br>'
+        + " · ".join(bits)
+        + f'<br><span class="muted">{esc(source)} · as of {esc(asof)}</span>'
+        + '<br><span class="muted">Yellow if 7-day change &lt; −5% or price is &gt;10% below its 30-day high.</span></p>'
+    )
+
+
 def demand_tile(view: dict) -> str:
     if view["h100_rows"] and view["b200_rows"] and not view["rent_manual"]:
         h100 = view["h100_rows"][-1]
@@ -976,7 +1129,7 @@ def demand_tile(view: dict) -> str:
         view["legs"]["demand"],
         h_html,
         change,
-        f"B200 {b_html}{mark}" + ((" · " + one_m) if one_m else ""),
+        f"B200 {b_html}{mark}" + ((" · " + one_m) if one_m else "") + gpu_rental_html(view),
         "a 20% monthly drop and a 2027 capex cut that cites demand. Yellow is a 10% monthly drop.",
     )
 
@@ -1506,6 +1659,7 @@ p { margin: 0; overflow-wrap: break-word; }
 .tile.red { border-top-color: #c0392b; }
 .tile.missing { border-top-color: #9aa0a6; }
 .rest { font-size: 13px; margin-top: 4px; }
+.gpu { margin-top: 4px; }
 .to { margin-top: auto; padding-top: 4px; color: var(--muted); font-size: 13px; }
 .gauge { position: relative; height: 8px; margin: 8px 0 4px; background: var(--line); border-radius: 99px; }
 .gauge i { position: absolute; top: -3px; width: 4px; height: 14px; border-radius: 2px; background: var(--good); }
