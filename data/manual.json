@@ -6,10 +6,15 @@
     "source": "Jess, manual, 6 Nov 2026. CRWV 2031/2032 unsecured yield. Not a live trace."
   },
   "crwv_cds": {
-    "asof_sgt": "2026-11-06T16:00:00+08:00",
-    "label": "~1,155 bp",
+    "asof_sgt": "2026-11-10T23:01:00+08:00",
+    "label": "~1,152 bp",
     "manual": true,
-    "source": "Jess, manual, 6 Nov 2026. No live public CDS print was loaded."
+    "source": "CRWV 5y CDS, pre-Q3-print, via morning refresh 11 Nov; post-print ~1,135 bp (time unstamped)."
+  },
+  "ai_money_judgment": {
+    "light": "yellow",
+    "asof_sgt": "2026-11-08T20:55:00+08:00",
+    "note": "Team judgment: CRWV funding stress, no failed refi, auction pending 19 Nov"
   },
   "silicon_data": {
     "asof_sgt": "2026-11-11T09:15:00+08:00",

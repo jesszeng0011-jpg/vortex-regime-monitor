@@ -134,6 +134,10 @@ def monthly_stale(obs: date, now: datetime, kind: str) -> bool:
     return (obs.year, obs.month) < (expected.year, expected.month)
 
 
+def calendar_age_days(asof: datetime, now: datetime) -> int:
+    return (now.astimezone(SGT).date() - asof.astimezone(SGT).date()).days
+
+
 def manual_stale(asof: datetime, now: datetime) -> bool:
     latest = latest_completed_session(now)
     asof_day = asof.astimezone(SGT).date()
@@ -332,6 +336,42 @@ def money_is_red(auction_state: str, funding_flag: bool) -> bool:
     return auction_state == "red" and funding_flag
 
 
+def money_light(
+    auction_state: str,
+    funding_flag: bool,
+    yield_stale: bool,
+    cds_stale: bool,
+    judgment_light: str | None,
+    yield_age_days: int,
+    cds_age_days: int,
+    judgment_age_days: int | None,
+) -> str:
+    """A stale print must not make the lamp greener than the last judgment.
+
+    Red is a failed auction plus a funding flag. A fresh funding flag is yellow.
+    If either input is stale, keep the judged light and grey only that number.
+    Missing requires the yield, the CDS, and the judgment to all be older than 10 days.
+    One fresh CDS does not turn the lamp green while the yield is stale.
+    """
+    if money_is_red(auction_state, funding_flag):
+        return "red"
+    if funding_flag:
+        return "yellow"
+    all_old = (
+        yield_age_days > 10
+        and cds_age_days > 10
+        and judgment_age_days is not None
+        and judgment_age_days > 10
+    )
+    if all_old:
+        return "missing"
+    if yield_stale or cds_stale:
+        if judgment_light in ("red", "yellow"):
+            return judgment_light
+        return "missing"
+    return "green"
+
+
 def rules_light(texas: dict, stale: bool) -> str:
     """Red is a signed ban or a pause beyond the current audit freeze.
 
@@ -473,6 +513,14 @@ def self_check() -> None:
     assert money_is_red("red", True) is True
     assert money_is_red("pending", True) is False
     assert money_is_red("yellow", True) is False
+    assert money_light("pending", False, True, False, "yellow", 5, 1, 3) == "yellow"
+    assert money_light("pending", False, True, True, "yellow", 5, 5, 3) == "yellow"
+    assert money_light("pending", False, True, True, "yellow", 12, 12, 11) == "missing"
+    assert money_light("pending", False, True, False, "yellow", 12, 1, 11) == "yellow"
+    assert money_light("red", True, False, False, "yellow", 0, 0, 3) == "red"
+    assert money_light("pending", True, False, False, "yellow", 0, 0, 3) == "yellow"
+    assert money_light("pending", False, False, False, "yellow", 1, 1, 3) == "green"
+    assert money_light("pending", False, True, False, "yellow", 5, 0, 3) != "green"
     yellow_pause = {"signed_ban": False, "grid_pause_confirmed": False, "audit_tied_pause": True}
     assert rules_light(yellow_pause, False) == "yellow"
     assert rules_light({**yellow_pause, "grid_pause_confirmed": True}, False) == "red"
@@ -627,15 +675,18 @@ def build_view(bundle: dict) -> dict:
     cds_old = manual_stale(datetime.fromisoformat(cds_m["asof_sgt"]), now)
     funding_flag = yield_m.get("label", "").startswith(">") and not yield_old
     auction_state = "pending"
-    money_red = money_is_red(auction_state, funding_flag)
-    if money_red:
-        money = "red"
-    elif funding_flag:
-        money = "yellow"
-    elif yield_old and cds_old:
-        money = "missing"
-    else:
-        money = "green"
+    money_judgment = manual.get("ai_money_judgment") or {}
+    judgment_asof = money_judgment.get("asof_sgt")
+    money = money_light(
+        auction_state,
+        funding_flag,
+        yield_old,
+        cds_old,
+        money_judgment.get("light"),
+        calendar_age_days(datetime.fromisoformat(yield_m["asof_sgt"]), now),
+        calendar_age_days(datetime.fromisoformat(cds_m["asof_sgt"]), now),
+        calendar_age_days(datetime.fromisoformat(judgment_asof), now) if judgment_asof else None,
+    )
 
     silicon = bundle["silicon"]
     rent_manual = False
@@ -769,6 +820,7 @@ def build_view(bundle: dict) -> dict:
         "yield_m": yield_m,
         "cds_m": cds_m,
         "yield_old": yield_old,
+        "money_judgment": money_judgment,
         "cds_old": cds_old,
         "h100_rows": h100_rows,
         "gpu_rental": gpu_rows,
@@ -985,7 +1037,11 @@ def ratio_bits(view: dict) -> tuple[str, str]:
 def money_tile(view: dict) -> str:
     y = view["yield_m"]
     c = view["cds_m"]
-    y_html = tip(y["label"], f"Manual {fmt_dt(datetime.fromisoformat(y['asof_sgt']))}. {y['source']}", "na" if view["yield_old"] else "st-yellow")
+    y_detail = f"Manual {fmt_dt(datetime.fromisoformat(y['asof_sgt']))}. {y['source']}"
+    judgment = view.get("money_judgment") or {}
+    if view["yield_old"] and judgment.get("note"):
+        y_detail += f" Stale print. The lamp stays {judgment.get('light', 'yellow')}: {judgment['note']}"
+    y_html = tip(y["label"], y_detail, "na" if view["yield_old"] else "st-yellow")
     c_html = tip(c["label"], f"Manual {fmt_dt(datetime.fromisoformat(c['asof_sgt']))}. {c['source']}", "na" if view["cds_old"] else "")
     ratio, _week = ratio_bits(view)
     return tile(
