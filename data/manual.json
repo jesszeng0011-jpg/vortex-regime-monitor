@@ -12,11 +12,16 @@
     "source": "Jess, manual, 6 Nov 2026. No live public CDS print was loaded."
   },
   "silicon_data": {
-    "asof_sgt": "2026-11-08T22:49:00+08:00",
-    "h100_usd": 3.0,
-    "b200_usd": 6.81,
+    "asof_sgt": "2026-11-11T09:15:00+08:00",
+    "data_date": "2026-11-10",
+    "h100_usd": 3.06,
+    "b200_usd": 6.97,
+    "h100_7d": 0.0338,
+    "b200_7d": 0.0657,
+    "h100_high_30d": 3.06,
+    "b200_high_30d": 6.97,
     "manual": true,
-    "source": "Jess, 8 Nov 2026. Fallback only if the Silicon Data index pages do not parse. Not a live pull by itself."
+    "source": "Silicon Data SiliconIndex, public free tier. GPU data as of 2026-11-10. Hand entry fetched 11 Nov 2026, 09:15 SGT. Used only when the index pages do not parse."
   },
   "book_beta": {
     "value": 0.65,
