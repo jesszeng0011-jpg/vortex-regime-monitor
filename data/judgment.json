@@ -1,17 +1,8 @@
 {
-  "asof_sgt": "2026-11-10T22:05:00+08:00",
+  "asof_sgt": "2026-11-13T16:03:00+08:00",
   "current_box": "B",
   "last_box": null,
   "prior_probabilities": {
-    "A": 7,
-    "B": 40,
-    "C": 10,
-    "D_money": 25,
-    "D_demand": null,
-    "F": 15,
-    "E": 3
-  },
-  "probabilities": {
     "A": 7,
     "B": 30,
     "C": 20,
@@ -20,5 +11,14 @@
     "F": 15,
     "E": 3
   },
-  "note": "Jess's judgment on 10 Nov 2026 after the Oct CPI print. B was 40 and C was 10. D-demand was not assigned. Hand-entered. The refresh must not overwrite this file."
+  "probabilities": {
+    "A": 7,
+    "B": 27,
+    "C": 23,
+    "D_money": 25,
+    "D_demand": null,
+    "F": 15,
+    "E": 3
+  },
+  "note": "Team judgment on 13 Nov 2026, 16:03 SGT. B was 30 and C was 20. D was not raised. D-demand was not assigned. Hand-entered. The refresh must not overwrite this file."
 }

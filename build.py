@@ -262,6 +262,16 @@ def load_yahoo(path: Path) -> dict | None:
     return {"high52": meta.get("fiftyTwoWeekHigh"), "bars": bars}
 
 
+def pick_dgs2() -> tuple[list[tuple[date, float]], str]:
+    treasury = load_fred(DATA / "treasury_2y.csv") if (DATA / "treasury_2y.csv").exists() else []
+    fred = load_fred(DATA / "f_DGS2.csv") if (DATA / "f_DGS2.csv").exists() else []
+    if treasury and (not fred or treasury[-1][0] >= fred[-1][0]):
+        return treasury, "treasury"
+    if fred:
+        return fred, "fred"
+    return [], "none"
+
+
 def load_bundle(now: datetime) -> dict:
     quotes = {}
     for ticker in [row[0] for row in PRICES] + ["NBIS", "SMH", "CL=F", "BZ=F"]:
@@ -270,6 +280,7 @@ def load_bundle(now: datetime) -> dict:
             loaded = load_yahoo(path)
             if loaded:
                 quotes[ticker] = loaded
+    dgs2, dgs_source = pick_dgs2()
     judgment = load_json(DATA / "judgment.json")
     for key in ("A", "B", "C", "D_money", "D_demand", "F", "E"):
         if key not in judgment["probabilities"]:
@@ -283,7 +294,8 @@ def load_bundle(now: datetime) -> dict:
         "manual": load_json(DATA / "manual.json"),
         "catalysts": load_json(DATA / "catalysts.json"),
         "status": load_json(DATA / "fetch_status.json") if (DATA / "fetch_status.json").exists() else {"failed": []},
-        "dgs2": load_fred(DATA / "f_DGS2.csv") if (DATA / "f_DGS2.csv").exists() else [],
+        "dgs2": dgs2,
+        "dgs_source": dgs_source,
         "hy": load_fred(DATA / "f_BAMLH0A0HYM2.csv") if (DATA / "f_BAMLH0A0HYM2.csv").exists() else [],
         "sofr": load_fred(DATA / "f_SOFR.csv") if (DATA / "f_SOFR.csv").exists() else [],
         "claims": load_fred(DATA / "f_ICSA.csv") if (DATA / "f_ICSA.csv").exists() else [],
@@ -372,19 +384,50 @@ def money_light(
     return "green"
 
 
-def rules_light(texas: dict, stale: bool) -> str:
+def rules_light(texas: dict, stale: bool, age_days: int | None = None) -> str:
     """Red is a signed ban or a pause beyond the current audit freeze.
 
     audit_tied_pause is the Abbott-era audit and TCEQ halt. It is yellow.
     It must not be stored in signed_ban or grid_pause_confirmed.
+    A stale as-of keeps that judged color. The date goes grey. The lamp
+    goes missing only after the judgment itself is older than 10 days.
     """
-    if stale:
-        return "missing"
     if texas.get("signed_ban") or texas.get("grid_pause_confirmed"):
-        return "red"
-    if texas.get("audit_tied_pause"):
-        return "yellow"
-    return "green"
+        judged = "red"
+    elif texas.get("audit_tied_pause"):
+        judged = "yellow"
+    else:
+        judged = "green"
+    if stale and age_days is not None and age_days > 10:
+        return "missing"
+    return judged
+
+
+def judged_fallback(computed: str, stale: bool, judgment_light: str | None, judgment_age_days: int | None) -> str:
+    """A stale or missing input must not make the lamp greener, or blank it.
+
+    A redder computed light still stands. Missing is used only when the
+    stored judgment is itself older than 10 days.
+    """
+    if not stale:
+        return computed
+    if judgment_light not in ("green", "yellow", "red"):
+        return "missing"
+    if judgment_age_days is not None and judgment_age_days > 10:
+        return "missing"
+    rank = {"green": 0, "yellow": 1, "red": 2}
+    if computed in rank and rank[computed] >= rank[judgment_light]:
+        return computed
+    return judgment_light
+
+
+def judgment_age(manual: dict, key: str, now: datetime) -> tuple[str | None, int | None]:
+    row = manual.get(key) or {}
+    light = row.get("light")
+    stamp = row.get("asof_sgt")
+    if not stamp:
+        return light if isinstance(light, str) else None, None
+    return (light if isinstance(light, str) else None), calendar_age_days(datetime.fromisoformat(stamp), now)
 
 
 def header_action(money_red: bool, hy_red: bool, inflation_red: bool = False) -> str:
@@ -526,7 +569,16 @@ def self_check() -> None:
     assert rules_light({**yellow_pause, "grid_pause_confirmed": True}, False) == "red"
     assert rules_light({"signed_ban": True, "grid_pause_confirmed": False}, False) == "red"
     assert rules_light({"signed_ban": False, "grid_pause_confirmed": False}, False) == "green"
-    assert rules_light(yellow_pause, True) == "missing"
+    assert rules_light(yellow_pause, True) == "yellow"
+    assert rules_light(yellow_pause, True, 3) == "yellow"
+    assert rules_light(yellow_pause, True, 11) == "missing"
+    assert judged_fallback("yellow", True, "red", 3) == "red"
+    assert judged_fallback("missing", True, "red", 3) == "red"
+    assert judged_fallback("red", True, "red", 3) == "red"
+    assert judged_fallback("green", True, "yellow", 3) == "yellow"
+    assert judged_fallback("yellow", False, "red", 3) == "yellow"
+    assert judged_fallback("missing", True, "green", 12) == "missing"
+    assert judged_fallback("red", True, "yellow", 3) == "red"
     sample = [
         {"when_sgt": "2026-11-10T15:30:00+08:00", "id": "a"},
         {"when_sgt": "2026-11-25T21:30:00+08:00", "id": "b"},
@@ -614,6 +666,7 @@ def build_view(bundle: dict) -> dict:
     prior = prints[-2] if len(prints) > 1 else None
     cpi_old = core is None or monthly_stale(core["month"], now, "cpi")
     dgs = bundle["dgs2"]
+    dgs_source = bundle.get("dgs_source") or "fred"
     dgs_old = len(dgs) < 21 or daily_stale(dgs[-1][0], now)
     rates_bp = (dgs[-1][1] - dgs[-21][1]) if len(dgs) >= 21 else None
     rates_up = bool(rates_bp is not None and rates_bp > 0)
@@ -648,6 +701,8 @@ def build_view(bundle: dict) -> dict:
     else:
         inflation = "green"
     inflation, inflation_override = inflation_light(inflation, manual, core)
+    inflation_judge, inflation_age = judgment_age(manual, "inflation_judgment", now)
+    inflation = judged_fallback(inflation, dgs_old or cpi_old, inflation_judge, inflation_age)
 
     claims = bundle["claims"]
     claims_old = len(claims) < 4 or weekly_stale(claims[-1][0], now)
@@ -663,11 +718,13 @@ def build_view(bundle: dict) -> dict:
         growth = "missing"
     else:
         growth = "green"
+    growth_judge, growth_age = judgment_age(manual, "growth_judgment", now)
+    growth = judged_fallback(growth, claims_old or pay_old, growth_judge, growth_age)
 
     texas = manual["texas"]
     texas_asof = datetime.fromisoformat(texas["asof_sgt"])
     texas_old = manual_stale(texas_asof, now)
-    rules = rules_light(texas, texas_old)
+    rules = rules_light(texas, texas_old, calendar_age_days(texas_asof, now))
 
     yield_m = manual["crwv_yield"]
     cds_m = manual["crwv_cds"]
@@ -728,6 +785,8 @@ def build_view(bundle: dict) -> dict:
     if not gpu_rows:
         gpu_status = "missing"
     demand = demand_with_gpu(demand, gpu_status)
+    demand_judge, demand_age = judgment_age(manual, "demand_judgment", now)
+    demand = judged_fallback(demand, rents_old, demand_judge, demand_age)
 
     hy = bundle["hy"]
     sofr = bundle["sofr"]
@@ -745,6 +804,8 @@ def build_view(bundle: dict) -> dict:
         spill = "missing"
     else:
         spill = "green"
+    spill_judge, spill_age = judgment_age(manual, "spill_judgment", now)
+    spill = judged_fallback(spill, hy_old, spill_judge, spill_age)
 
     legs = {
         "inflation": inflation,
@@ -776,7 +837,7 @@ def build_view(bundle: dict) -> dict:
     else:
         why = why + "; the stop list is clear"
     reason = f"{why}. {closest}"
-    if action == "HOLD" and inflation == "red" and inflation_override:
+    if action == "HOLD" and inflation == "red":
         reason = HOLD_WHEN_INFLATION_RED
 
     events = []
@@ -803,6 +864,7 @@ def build_view(bundle: dict) -> dict:
         "twice": twice,
         "dgs": dgs,
         "dgs_old": dgs_old,
+        "dgs_source": dgs_source,
         "brent": brent,
         "wti": wti,
         "brent_px": brent_px,
@@ -900,12 +962,15 @@ def inflation_tile(view: dict) -> str:
         core_html = tip(DASH, "FRED CPILFESL was not loaded.")
     if view["rates_bp"] is not None and not view["dgs_old"]:
         dgs = view["dgs"]
+        source = "US Treasury daily par yield curve, 2-year" if view.get("dgs_source") == "treasury" else "FRED DGS2"
+        nov10 = next((value for day, value in dgs if day == date(2026, 11, 10)), None)
+        extra = f" 10 Nov was {nov10:.2f}%." if nov10 is not None else ""
         rate_html = tip(
             fmt_bp(view["rates_bp"]) + "/20d",
-            f"FRED DGS2, from {dgs[-21][1]:.2f}% on {fmt_day(dgs[-21][0])} to {dgs[-1][1]:.2f}% on {fmt_day(dgs[-1][0])}. Not a bill or 10-year yield.",
+            f"{source}, from {dgs[-21][1]:.2f}% on {fmt_day(dgs[-21][0])} to {dgs[-1][1]:.2f}% on {fmt_day(dgs[-1][0])}.{extra} Not a bill or 10-year yield.",
         )
     else:
-        rate_html = tip(DASH, "FRED DGS2 was not loaded or is old." + failure_note(view["status"], "fred DGS2"))
+        rate_html = tip(DASH, "The 2-year yield was not loaded or is old." + failure_note(view["status"], "treasury 2y") + failure_note(view["status"], "fred DGS2"), "na")
     def oil_html(label, ticker, bars, value):
         if not bars or value is None:
             return tip(DASH, f"{label} was not loaded." + failure_note(view["status"], ticker))
@@ -919,7 +984,11 @@ def inflation_tile(view: dict) -> str:
         week_txt = "" if week is None else " " + fmt_pct(week) + " 1w"
         return tip(f"{label} {value:,.2f}", f"Yahoo Finance {ticker}. {session_phrase(bars[-1])}", kind) + esc(week_txt)
     missing = []
-    if view["twice"] and not view["rates_up"]:
+    if view["dgs_old"]:
+        missing.append("the 2-year yield is not loaded")
+    elif view["twice"] and view["rates_up"]:
+        missing.append("two 0.3% prints are in and the 2-year yield is up")
+    elif view["twice"] and not view["rates_up"]:
         missing.append("two 0.3% prints are in, and the 2-year yield is not up")
     elif view["core"] and view["core"]["published"] >= Decimal("0.3"):
         missing.append("needs a second core print at or above 0.3% with the 2-year yield up")
@@ -996,9 +1065,11 @@ def growth_tile(view: dict) -> str:
 def rules_tile(view: dict) -> str:
     texas = view["texas"]
     light = view["legs"]["rules"]
-    kind = "na" if view["texas_old"] else ("st-yellow" if light == "yellow" else ("st-red" if light == "red" else ""))
+    kind = "st-yellow" if light == "yellow" else ("st-red" if light == "red" else ("na" if light == "missing" else ""))
     detail = f"Manual {fmt_dt(datetime.fromisoformat(texas['asof_sgt']))}. {texas['source']}"
     line = tip(texas["line"], detail, kind)
+    if view["texas_old"]:
+        line += " " + tip(f"as of {fmt_dt(datetime.fromisoformat(texas['asof_sgt']))}", detail, "na")
     note = texas.get("detail") or ""
     body = tip(note, detail) if note else ""
     return tile(
@@ -1322,7 +1393,10 @@ def split_when(label: str) -> tuple[str, str]:
 def catalyst_block(view: dict) -> str:
     chunks = []
     for event in view["shown"]:
-        if view["now"] >= event["when"]:
+        reported = event.get("reported") if view["now"] >= event["when"] else ""
+        if reported:
+            result_html = esc(reported)
+        elif view["now"] >= event["when"]:
             bits = [reaction_text(hit, event, view) for hit in event["hits"]]
             result = ", ".join(bit for bit in bits if bit) or DASH
             result_html = esc(result)
@@ -1332,7 +1406,9 @@ def catalyst_block(view: dict) -> str:
         day, clock = split_when(event["label"])
         ready = ""
         cards = ""
-        if event.get("scorecard"):
+        if reported:
+            ready = f'<span class="ready">{esc(event.get("reported_label") or "Reported")}</span>'
+        elif event.get("scorecard"):
             if scorecard_open(event, view["now"]):
                 cards = scorecard_html(event)
             else:

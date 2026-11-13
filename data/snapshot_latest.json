@@ -1,5 +1,5 @@
 {
-  "asof_sgt": "13 Nov 2026, 08:07 SGT",
+  "asof_sgt": "13 Nov 2026, 16:04 SGT",
   "series": {
     "SPY": {
       "value": 757.1199951171875,
@@ -54,8 +54,8 @@
       "session": "2026-11-11"
     },
     "DGS2": {
-      "value": 4.73,
-      "session": "2026-11-10"
+      "value": 4.86,
+      "session": "2026-11-12"
     },
     "H100": {
       "value": 3.06,
