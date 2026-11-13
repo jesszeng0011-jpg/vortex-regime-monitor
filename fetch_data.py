@@ -6,6 +6,8 @@ private snapshot.
 """
 from __future__ import annotations
 
+import csv
+import io
 import json
 import re
 import ssl
@@ -77,6 +79,59 @@ def parse_index_table(html: str) -> list[dict]:
     return rows
 
 
+def parse_treasury_csv(raw: bytes) -> list[tuple[str, str]]:
+    text = raw.decode("utf-8", "replace")
+    rows = []
+    for line in csv.DictReader(io.StringIO(text)):
+        stamp = (line.get("Date") or "").strip()
+        value = (line.get("2 Yr") or "").strip()
+        if not stamp or not value:
+            continue
+        day = datetime.strptime(stamp, "%m/%d/%Y").date()
+        rows.append((day.isoformat(), f"{float(value):.2f}"))
+    if len(rows) < 21:
+        raise ValueError("treasury yield curve is too short")
+    rows.sort()
+    return rows
+
+
+def parse_treasury_xml(raw: bytes) -> list[tuple[str, str]]:
+    text = raw.decode("utf-8", "replace")
+    rows = []
+    for block in re.findall(r"<m:properties>(.*?)</m:properties>", text, flags=re.S):
+        stamp = re.search(r"<d:NEW_DATE[^>]*>([^<]+)", block)
+        value = re.search(r"<d:BC_2YEAR[^>]*>([^<]+)", block)
+        if not stamp or not value:
+            continue
+        day = datetime.fromisoformat(stamp.group(1)[:10]).date()
+        rows.append((day.isoformat(), f"{float(value.group(1)):.2f}"))
+    if len(rows) < 21:
+        raise ValueError("treasury yield xml is too short")
+    rows.sort()
+    return rows
+
+
+def treasury_csv_bytes(rows: list[tuple[str, str]]) -> bytes:
+    lines = ["date,value"] + [f"{day},{value}" for day, value in rows]
+    return ("\n".join(lines) + "\n").encode()
+
+
+def fetch_treasury_2y() -> bytes:
+    csv_url = (
+        "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/"
+        "daily-treasury-rates.csv/2026/all?type=daily_treasury_yield_curve"
+        "&field_tdr_date_value=2026&page&_format=csv"
+    )
+    xml_url = (
+        "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/"
+        "pages/xml?data=daily_treasury_yield_curve&field_tdr_date_value=2026"
+    )
+    try:
+        return treasury_csv_bytes(parse_treasury_csv(get(csv_url, timeout=40)))
+    except Exception:
+        return treasury_csv_bytes(parse_treasury_xml(get(xml_url, timeout=40)))
+
+
 def fetch_silicon() -> dict:
     pages = {
         "h100": "https://www.silicondata.com/products/silicon-index/h100",
@@ -122,6 +177,13 @@ def main() -> int:
             ok.append(f"fred {series}")
         except Exception as exc:  # noqa: BLE001
             failed.append({"id": f"fred {series}", "error": str(exc)[:180], "kept_existing": str(dest.exists())})
+
+    treasury_dest = DATA / "treasury_2y.csv"
+    try:
+        save(treasury_dest, fetch_treasury_2y())
+        ok.append("treasury 2y")
+    except Exception as exc:  # noqa: BLE001
+        failed.append({"id": "treasury 2y", "error": str(exc)[:180], "kept_existing": str(treasury_dest.exists())})
 
     silicon_dest = DATA / "silicon_index.json"
     try:

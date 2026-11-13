@@ -34,6 +34,26 @@
     "manual": true,
     "source": "Fund Assistant official, 8 Nov 2026. Manual on this page."
   },
+  "inflation_judgment": {
+    "light": "red",
+    "asof_sgt": "2026-11-10T22:05:00+08:00",
+    "note": "Two core 0.3% prints are in. Approved 10 Nov 2026, 22:05 SGT."
+  },
+  "growth_judgment": {
+    "light": "green",
+    "asof_sgt": "2026-11-13T08:07:00+08:00",
+    "note": "Claims and payrolls were inside the green band on the last fresh print."
+  },
+  "demand_judgment": {
+    "light": "green",
+    "asof_sgt": "2026-11-13T08:07:00+08:00",
+    "note": "GPU rents were not in the yellow band on the last fresh print."
+  },
+  "spill_judgment": {
+    "light": "green",
+    "asof_sgt": "2026-11-13T08:07:00+08:00",
+    "note": "HY OAS was under 4.0% on the last fresh print."
+  },
   "inflation_print": {
     "asof_sgt": "2026-11-10T22:05:00+08:00",
     "covers_month": "2026-10-01",
@@ -43,13 +63,13 @@
     "source": "BLS / CNBC, 10 Nov 2026. Hand entry until FRED CPILFESL includes October."
   },
   "texas": {
-    "asof_sgt": "2026-11-09T09:00:00+08:00",
+    "asof_sgt": "2026-11-13T09:27:00+08:00",
     "line": "Pause in effect",
-    "detail": "Aug 3 grid-connect audit (fail = no interconnect). Sep 21 TCEQ permit halt. No signed ban. Under 25 MW exempt. Next: ERCOT report Dec 10 · decision Dec 17 (UV).",
+    "detail": "Aug 3 grid-connect audit (fail = no interconnect). Sep 21 TCEQ permit halt. No signed ban. Under 25 MW exempt. ERCOT report due 10 Dec. Brownsville's local 90-day moratorium from 5 Nov does not change the light. Next: ERCOT report Dec 10 · decision Dec 17 (UV).",
     "signed_ban": false,
     "grid_pause_confirmed": false,
     "audit_tied_pause": true,
     "manual": true,
-    "source": "Texas Tribune, 4 Nov 2026; King & Spalding, 6 Nov 2026. Entered 9 Nov 2026. Abbott's 3 Aug 2026 PUCT/ERCOT audit and 21 Sep 2026 TCEQ halt, including on-site gas, are in effect until the waitlist audit is done. Fail the audit and the interconnect is denied. Loads under 25 MW are exempt. No signed statewide ban. Hinojosa's moratorium is a campaign pledge; she takes office 19 Jan 2027."
+    "source": "Texas watch 13 Nov 2026, 09:27 SGT. Audit-tied pause continues. ERCOT report due 10 Dec. No signed ban. Hinojosa's moratorium is still a pledge until she takes office 19 Jan 2027. Brownsville's local 90-day moratorium from 5 Nov does not change the light. Texas Tribune, 4 Nov 2026; King & Spalding, 6 Nov 2026."
   }
 }

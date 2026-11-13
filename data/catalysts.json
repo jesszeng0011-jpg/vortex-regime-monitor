@@ -33,7 +33,9 @@
     "event": "Nebius Q3",
     "leg": "AI money",
     "hits": ["NBIS"],
-    "scorecard": true
+    "scorecard": true,
+    "reported_label": "Reported 12 Nov",
+    "reported": "Revenue $980.8m. 2026 revenue guide cut to $3.0–3.2bn from $3.0–3.4bn, citing capacity delays. Capex raised. NBIS −16.8% on 12 Nov. Nebius PR / Reuters, 12 Nov."
   },
   {
     "id": "nvda-q3",

@@ -13,5 +13,13 @@
     "old": "B 40, C 10",
     "new": "B 30, C 20",
     "source": "Jess"
+  },
+  {
+    "date_sgt": "2026-11-13T16:03:00+08:00",
+    "line": "13 Nov 16:03 SGT · B 30→27, C 20→23. Reason: 10Y back above 5% (5.10%, 12 Nov) and 2Y 4.86%; DXY 19-month high ~103.1; gold (13-month low) and crypto repricing together with rates/dollar; Dec +50bp tail still ~13–15% after Waller said 50bp should be considered on a 0.3% core. D not raised: AI money yellow, AI demand green.",
+    "what": "B 30→27, C 20→23",
+    "old": "B 30, C 20",
+    "new": "B 27, C 23",
+    "source": "Team judgment"
   }
 ]
