@@ -572,6 +572,10 @@ def self_check() -> None:
     assert rules_light(yellow_pause, True) == "yellow"
     assert rules_light(yellow_pause, True, 3) == "yellow"
     assert rules_light(yellow_pause, True, 11) == "missing"
+    assert [key for key, _, _ in ordered_segments({
+        "B": 27, "D_money": 25, "F": 15, "C": 23, "A": 7, "E": 3, "D_demand": None,
+    })] == ["B", "D_money", "C", "F", "A", "E"]
+    assert [key for key, _, _ in ordered_segments({"B": 25, "C": 25, "D_money": 10})] == ["B", "C", "D_money"]
     assert judged_fallback("yellow", True, "red", 3) == "red"
     assert judged_fallback("missing", True, "red", 3) == "red"
     assert judged_fallback("red", True, "red", 3) == "red"
@@ -1574,12 +1578,23 @@ def regime_html(box: str) -> str:
     return f'{esc(name)} <span class="tag">{esc(key)}</span>'
 
 
+def ordered_segments(probs: dict) -> list[tuple[str, str, str]]:
+    """Largest probability first. Equal weights keep the original segment order."""
+    ranked = []
+    for index, (key, label, kind) in enumerate(SEGMENTS):
+        value = probs.get(key)
+        if isinstance(value, (int, float)):
+            ranked.append((-value, index, key, label, kind))
+    ranked.sort()
+    return [(key, label, kind) for _, _, key, label, kind in ranked]
+
+
 def prob_line(judgment: dict) -> str:
     probs = judgment["probabilities"]
     prior = judgment.get("prior_probabilities") or {}
     note = judgment.get("note", "")
     parts = []
-    for key, label, kind in SEGMENTS:
+    for key, label, kind in ordered_segments(probs):
         value = probs.get(key)
         if value is None:
             continue
