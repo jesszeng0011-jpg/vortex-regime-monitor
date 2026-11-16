@@ -1,5 +1,5 @@
 {
-  "ran_at_sgt": "2026-11-13T08:07:10+08:00",
+  "ran_at_sgt": "2026-11-16T08:08:26+08:00",
   "user_agent": "VortexRegimeMonitor/1.0",
   "ok": [
     "yahoo SPY",
@@ -21,6 +21,7 @@
     "fred ICSA",
     "fred PAYEMS",
     "fred CPILFESL",
+    "treasury 2y",
     "silicon data index"
   ],
   "failed": []
