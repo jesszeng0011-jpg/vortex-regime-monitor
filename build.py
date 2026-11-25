@@ -285,8 +285,9 @@ def load_bundle(now: datetime) -> dict:
     for key in ("A", "B", "C", "D_money", "D_demand", "F", "E"):
         if key not in judgment["probabilities"]:
             raise SystemExit(f"judgment is missing {key}")
-    if judgment.get("current_box") != "B":
-        raise SystemExit("judgment current box is not B")
+    box = judgment.get("current_box")
+    if box not in judgment["probabilities"] or not isinstance(judgment["probabilities"].get(box), (int, float)):
+        raise SystemExit(f"judgment current box {box!r} is missing a probability")
     return {
         "now": now,
         "quotes": quotes,

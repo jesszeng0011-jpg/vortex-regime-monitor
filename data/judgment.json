@@ -1,17 +1,8 @@
 {
-  "asof_sgt": "2026-11-13T16:03:00+08:00",
-  "current_box": "B",
-  "last_box": null,
+  "asof_sgt": "2026-11-25T22:30:00+08:00",
+  "current_box": "D_money",
+  "last_box": "B",
   "prior_probabilities": {
-    "A": 7,
-    "B": 30,
-    "C": 20,
-    "D_money": 25,
-    "D_demand": null,
-    "F": 15,
-    "E": 3
-  },
-  "probabilities": {
     "A": 7,
     "B": 27,
     "C": 23,
@@ -20,5 +11,14 @@
     "F": 15,
     "E": 3
   },
-  "note": "Team judgment on 13 Nov 2026, 16:03 SGT. B was 30 and C was 20. D was not raised. D-demand was not assigned. Hand-entered. The refresh must not overwrite this file."
+  "probabilities": {
+    "A": 7,
+    "B": 18,
+    "C": 23,
+    "D_money": 32,
+    "D_demand": null,
+    "F": 15,
+    "E": 5
+  },
+  "note": "Jess approved on 25 Nov 2026, 22:30 SGT. B 27\u219218, D-money 25\u219232, E 3\u21925 (C 23, F 15, A 7 unchanged). Oct PCE kept Inflation red; CoreWeave 5y CDS record 1,314bp turned AI money red. This supersedes the held 23 Nov proposal (B 20, D 30, E 5). D-demand was not assigned. Hand-entered. The refresh must not overwrite this file."
 }
